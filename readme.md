@@ -51,6 +51,7 @@ Config file is `config.json`. See `config.template.json` for a template.
 {
   "port": 8080,                      // Listen port, default 8080, requires restart
   "interval": 60,                    // Check interval in seconds, default 60
+  "manualRefreshCooldown": 60,       // Manual refresh cooldown in seconds (site-wide), default 60
   "frontend": {                      // Frontend display config
     "title": "My API Status",        // Page title (used for both <title> and <h1>)
     "icon": "https://example.com/icon.png",  // Favicon and logo, empty to hide
@@ -70,6 +71,7 @@ Config file is `config.json`. See `config.template.json` for a template.
 ```jsonc
 {
   "name": "OpenAI",              // Top-level group name
+  "manualRefresh": true,         // Enable manual refresh button (optional, default false)
   "subGroups": [
     {
       "name": "GPT-4o",          // Sub-group name (displayed as model name on page)
@@ -153,7 +155,8 @@ Config file is `config.json`. See `config.template.json` for a template.
 |---|---|
 | `GET /` | Status dashboard page |
 | `GET /api/status` | Status data (polled by frontend) |
-| `GET /api/config` | Config info (interval + frontend) |
+| `GET /api/config` | Config info (interval + frontend + manualRefreshCooldown + groups) |
+| `POST /api/refresh` | Manually trigger a refresh check (site-wide cooldown) |
 | `GET /api/status-page/{slug}` | Uptime Kuma-compatible status page |
 | `GET /api/status-page/heartbeat/{slug}` | Uptime Kuma-compatible heartbeat data |
 
@@ -165,6 +168,7 @@ Config file is `config.json`. See `config.template.json` for a template.
   "overall": { "status": "up", "label": "Running" },
   "last_completed_at": "2026-06-07T12:00:00Z",
   "checking": false,
+  "manual_refresh_remaining": 0,
   "sections": [
     {
       "name": "OpenAI",
@@ -187,17 +191,39 @@ Config file is `config.json`. See `config.template.json` for a template.
 
 `status` values: `up` / `down` / `degraded` / `unknown`
 
+### `POST /api/refresh` Manual Refresh
+
+Manually triggers a full site refresh check. Subject to a site-wide shared cooldown.
+
+```jsonc
+// Success (200)
+{ "ok": true, "cooldown": 60 }
+
+// Cooldown active (429)
+{ "error": "cooldown", "remaining": 45 }
+
+// Already checking (409)
+{ "error": "already checking" }
+```
+
+Cooldown duration is set via `manualRefreshCooldown` (default 60 seconds). Set `"manualRefresh": true` on a group to show a refresh button next to its title.
+
 ### `/api/config` Response
 
 ```jsonc
 {
   "interval": 60,
+  "manualRefreshCooldown": 60,
   "frontend": {
     "title": "My API Status",
     "icon": "https://example.com/icon.png",
     "subtitle": "...",
     "footer": "..."
-  }
+  },
+  "groups": [
+    { "name": "OpenAI", "manualRefresh": true },
+    { "name": "Google", "manualRefresh": false }
+  ]
 }
 ```
 

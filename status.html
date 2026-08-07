@@ -51,6 +51,10 @@ h1::after{content:'';position:absolute;bottom:-8px;left:50%;transform:translateX
 .section{margin-top:24px}
 .section-title{display:flex;align-items:center;justify-content:space-between;color:#444;font-size:13px;font-weight:900;text-transform:uppercase;padding:0 0 10px;font-family:'Courier New',Consolas,monospace}
 .scale{color:#888;font-weight:700;text-transform:none}
+.refresh-btn{font-family:'Courier New',Consolas,monospace;font-size:12px;font-weight:800;text-transform:uppercase;background:#32f08c;color:#000;border:2px solid #000;padding:4px 12px;cursor:pointer;box-shadow:2px 2px 0 0 #28c070;transition:all .15s ease;letter-spacing:1px}
+.refresh-btn:hover:not(:disabled){background:#28c070;box-shadow:3px 3px 0 0 #1a8a4f}
+.refresh-btn:disabled{background:#ccc;color:#888;cursor:not-allowed;box-shadow:2px 2px 0 0 #999}
+.section-title-right{display:flex;align-items:center;gap:10px}
 .lanes{border-top:3px solid #000}
 .lane{min-height:80px;display:grid;grid-template-columns:200px minmax(200px,1fr) 100px;gap:18px;align-items:center;border-bottom:3px solid #000;background:linear-gradient(90deg,rgba(50,240,140,.06),rgba(50,240,140,.02));padding:14px 0;animation:enter .34s ease both}
 .lane-head{display:flex;align-items:center;gap:10px;min-width:0;padding-left:4px}
@@ -191,6 +195,10 @@ function summarize(sections){
 }
 
 let _frontendTitle='Service Status';
+let _manualRefreshGroups=new Set();
+let _manualRefreshCooldown=60;
+let _manualRefreshRemaining=0;
+let _cooldownTimer=null;
 function render(data){
   document.title=data.title||_frontendTitle;
   const sections=Array.isArray(data.sections)?data.sections:[];
@@ -204,6 +212,14 @@ function render(data){
   document.getElementById('statusText').textContent=overall.label;
   document.getElementById('checkedAt').textContent=fmtTime(data.last_completed_at);
 
+  // 同步手动刷新冷却状态
+  const serverRemaining=data.manual_refresh_remaining||0;
+  if(serverRemaining>_manualRefreshRemaining){
+    _manualRefreshRemaining=serverRemaining;
+    if(_manualRefreshRemaining>0&&!_cooldownTimer){startCooldown();}
+  }
+  updateRefreshButtons();
+
   document.getElementById('overview').innerHTML=summary.top.map(g=>{
     return'<div class="signal"><div class="signal-name">'+escapeHtml(g.sub_name||'')+'</div><div class="signal-meta"><span>'+(g.label||'采样中')+'</span><span>'+pct(scoreValue(g))+'</span></div></div>';
   }).join('');
@@ -214,10 +230,12 @@ function render(data){
   for(const sec of sections){
     const rows=sec.rows||[];
     if(!rows.length)continue;
-    output+='<section class="section"><div class="section-title"><span>'+escapeHtml(sec.name||'')+'</span><span class="scale">历史采样 → 现在</span></div><div class="lanes">';
+    const canRefresh=_manualRefreshGroups.has(sec.name);
+    const refreshBtn=canRefresh?'<button class="refresh-btn" onclick="manualRefresh(this)">刷新</button>':'';
+    output+='<section class="section"><div class="section-title"><span>'+escapeHtml(sec.name||'')+'</span><div class="section-title-right">'+refreshBtn+'<span class="scale">历史采样 → 现在</span></div></div><div class="lanes">';
     for(const g of rows){
       const status=g.status||'unknown';
-      const latency=g.latency_ms?Math.round(g.latency_ms)+'ms':'无延迟样本';
+      const latency=g.latency_ms?(g.latency_ms/1000).toFixed(2)+'s':'无延迟样本';
       const displayName=g.sub_name||g.name||'';
       output+='<div class="lane"><div class="lane-head"><span class="mark '+status+'"></span><div class="lane-name"><strong title="'+escapeHtml(displayName)+'">'+escapeHtml(displayName)+'</strong><span>'+(g.label||'采样中')+' · '+latency+'</span></div></div><div class="rail"><div class="track">'+segments(g.history)+'</div><div class="time-row"><span>历史</span><span>'+fmtTime(g.last_checked_at)+'</span></div></div><div class="score"><b>'+pct(scoreValue(g))+'</b><span>'+(g.label||'采样中')+'</span></div></div>';
     }
@@ -255,12 +273,64 @@ async function initFrontend(){
     if(f.footer){
       document.getElementById('pageFooter').innerHTML=f.footer;
     }
+    _manualRefreshCooldown=cfg.manualRefreshCooldown||60;
+    if(Array.isArray(cfg.groups)){
+      _manualRefreshGroups=new Set(cfg.groups.filter(g=>g.manualRefresh).map(g=>g.name));
+    }
   }catch(e){}
 }
 async function start(){
   await initFrontend();
   load();
   setInterval(load,20000);
+}
+
+function manualRefresh(btn){
+  if(_manualRefreshRemaining>0)return;
+  btn.disabled=true;
+  btn.textContent='...';
+  fetch('/api/refresh',{method:'POST'}).then(r=>r.json()).then(data=>{
+    if(data.error==='cooldown'&&data.remaining){
+      _manualRefreshRemaining=data.remaining;
+      startCooldown();
+    }else if(data.error==='already checking'){
+      btn.disabled=false;
+      btn.textContent='刷新';
+    }else if(data.ok){
+      _manualRefreshRemaining=data.cooldown||_manualRefreshCooldown;
+      startCooldown();
+      load();
+    }
+  }).catch(()=>{
+    btn.disabled=false;
+    btn.textContent='刷新';
+  });
+}
+
+function startCooldown(){
+  if(_cooldownTimer)clearInterval(_cooldownTimer);
+  updateRefreshButtons();
+  _cooldownTimer=setInterval(()=>{
+    _manualRefreshRemaining--;
+    if(_manualRefreshRemaining<=0){
+      _manualRefreshRemaining=0;
+      clearInterval(_cooldownTimer);
+      _cooldownTimer=null;
+    }
+    updateRefreshButtons();
+  },1000);
+}
+
+function updateRefreshButtons(){
+  document.querySelectorAll('.refresh-btn').forEach(btn=>{
+    if(_manualRefreshRemaining>0){
+      btn.disabled=true;
+      btn.textContent=_manualRefreshRemaining+'s';
+    }else{
+      btn.disabled=false;
+      btn.textContent='刷新';
+    }
+  });
 }
 start();
 </script>

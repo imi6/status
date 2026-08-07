@@ -28,11 +28,12 @@ type FrontendConfig struct {
 
 // Config 配置文件结构
 type Config struct {
-	Port     int            `json:"port"`
-	Interval int            `json:"interval"`
-	Frontend FrontendConfig `json:"frontend"`
-	Kuma     KumaConfig     `json:"kuma"`
-	Groups   []Group        `json:"groups"`
+	Port                  int            `json:"port"`
+	Interval              int            `json:"interval"`
+	ManualRefreshCooldown int            `json:"manualRefreshCooldown"` // 手动刷新全站冷却时间（秒），默认60
+	Frontend              FrontendConfig `json:"frontend"`
+	Kuma                  KumaConfig     `json:"kuma"`
+	Groups                []Group        `json:"groups"`
 }
 
 type KumaConfig struct {
@@ -41,8 +42,9 @@ type KumaConfig struct {
 }
 
 type Group struct {
-	Name      string     `json:"name"`
-	SubGroups []SubGroup `json:"subGroups"`
+	Name          string     `json:"name"`
+	ManualRefresh bool       `json:"manualRefresh"` // 是否支持手动刷新
+	SubGroups     []SubGroup `json:"subGroups"`
 }
 
 type SubGroup struct {
@@ -88,19 +90,22 @@ type Section struct {
 }
 
 type StatusRespV2 struct {
-	Title           string        `json:"title"`
-	Overall         OverallStatus `json:"overall"`
-	LastCompletedAt *time.Time    `json:"last_completed_at,omitempty"`
-	Checking        bool          `json:"checking"`
-	Sections        []Section     `json:"sections"`
+	Title                  string        `json:"title"`
+	Overall                OverallStatus `json:"overall"`
+	LastCompletedAt        *time.Time    `json:"last_completed_at,omitempty"`
+	Checking               bool          `json:"checking"`
+	Sections               []Section     `json:"sections"`
+	ManualRefreshRemaining int           `json:"manual_refresh_remaining"` // 手动刷新剩余冷却秒数
 }
 
 var (
-	cfg      Config
-	mu       sync.RWMutex
-	statusV2 StatusRespV2
-	db       *sql.DB
-	checking bool
+	cfg              Config
+	mu               sync.RWMutex
+	statusV2         StatusRespV2
+	db               *sql.DB
+	checking         bool
+	lastManualRefresh time.Time
+	manualRefreshMu  sync.RWMutex
 )
 
 func loadConfig() {
@@ -119,6 +124,9 @@ func loadConfig() {
 	}
 	if newCfg.Interval == 0 {
 		newCfg.Interval = 60
+	}
+	if newCfg.ManualRefreshCooldown == 0 {
+		newCfg.ManualRefreshCooldown = 60
 	}
 	if newCfg.Frontend.Title == "" {
 		newCfg.Frontend.Title = "Service Status"
@@ -466,10 +474,16 @@ func pruneStaleSections(sections []Section, cfg Config) []Section {
 }
 
 func refresh() {
-	loadConfig()
+	// 防止并发执行：如果已有一次检测正在运行，则跳过
 	mu.Lock()
+	if checking {
+		mu.Unlock()
+		return
+	}
 	checking = true
 	mu.Unlock()
+
+	loadConfig()
 
 	// 以当前已有状态为起点，逐个检测并实时更新
 	mu.RLock()
@@ -768,8 +782,26 @@ func apiStatus(w http.ResponseWriter, r *http.Request) {
 	mu.RLock()
 	s := statusV2
 	c := checking
+	cooldown := cfg.ManualRefreshCooldown
+	if cooldown == 0 {
+		cooldown = 60
+	}
 	mu.RUnlock()
 	s.Checking = c
+
+	// 计算手动刷新剩余冷却时间
+	manualRefreshMu.RLock()
+	last := lastManualRefresh
+	manualRefreshMu.RUnlock()
+	if !last.IsZero() {
+		elapsed := int(time.Since(last).Seconds())
+		remaining := cooldown - elapsed
+		if remaining < 0 {
+			remaining = 0
+		}
+		s.ManualRefreshRemaining = remaining
+	}
+
 	writeJSON(w, 200, s)
 }
 
@@ -777,10 +809,93 @@ func apiConfig(w http.ResponseWriter, r *http.Request) {
 	mu.RLock()
 	interval := cfg.Interval
 	frontend := cfg.Frontend
+	cooldown := cfg.ManualRefreshCooldown
+	if cooldown == 0 {
+		cooldown = 60
+	}
+	groupSettings := make([]map[string]interface{}, 0, len(cfg.Groups))
+	for _, g := range cfg.Groups {
+		groupSettings = append(groupSettings, map[string]interface{}{
+			"name":          g.Name,
+			"manualRefresh": g.ManualRefresh,
+		})
+	}
 	mu.RUnlock()
 	writeJSON(w, 200, map[string]interface{}{
-		"interval": interval,
-		"frontend": frontend,
+		"interval":              interval,
+		"frontend":              frontend,
+		"manualRefreshCooldown": cooldown,
+		"groups":                groupSettings,
+	})
+}
+
+// manualRefreshRemaining 计算手动刷新剩余冷却秒数
+func manualRefreshRemaining() int {
+	manualRefreshMu.RLock()
+	last := lastManualRefresh
+	manualRefreshMu.RUnlock()
+	if last.IsZero() {
+		return 0
+	}
+	mu.RLock()
+	cooldown := cfg.ManualRefreshCooldown
+	if cooldown == 0 {
+		cooldown = 60
+	}
+	mu.RUnlock()
+	elapsed := int(time.Since(last).Seconds())
+	remaining := cooldown - elapsed
+	if remaining < 0 {
+		remaining = 0
+	}
+	return remaining
+}
+
+// apiRefresh 手动刷新检测接口
+func apiRefresh(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, 405, map[string]string{"error": "method not allowed"})
+		return
+	}
+
+	// 检查冷却时间
+	if remaining := manualRefreshRemaining(); remaining > 0 {
+		writeJSON(w, 429, map[string]interface{}{
+			"error":     "cooldown",
+			"remaining": remaining,
+		})
+		return
+	}
+
+	// 检查是否正在检测中
+	mu.RLock()
+	isChecking := checking
+	mu.RUnlock()
+	if isChecking {
+		writeJSON(w, 409, map[string]interface{}{
+			"error": "already checking",
+		})
+		return
+	}
+
+	// 记录冷却开始时间
+	manualRefreshMu.Lock()
+	lastManualRefresh = time.Now()
+	manualRefreshMu.Unlock()
+
+	// 异步触发刷新
+	go refresh()
+
+	mu.RLock()
+	cooldown := cfg.ManualRefreshCooldown
+	if cooldown == 0 {
+		cooldown = 60
+	}
+	mu.RUnlock()
+
+	writeJSON(w, 200, map[string]interface{}{
+		"ok":       true,
+		"cooldown": cooldown,
 	})
 }
 
@@ -1019,6 +1134,7 @@ func main() {
 
 	http.HandleFunc("/api/status", apiStatus)
 	http.HandleFunc("/api/config", apiConfig)
+	http.HandleFunc("/api/refresh", apiRefresh)
 	http.HandleFunc("/api/status-page/heartbeat/", apiStatusPageHeartbeat)
 	http.HandleFunc("/api/status-page/", apiStatusPage)
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

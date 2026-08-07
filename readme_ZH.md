@@ -51,6 +51,7 @@ go build -ldflags "-s -w" -o status-linux-amd64 .
 {
   "port": 8080,                      // 监听端口，默认 8080，重启生效
   "interval": 60,                    // 检测间隔（秒），默认 60
+  "manualRefreshCooldown": 60,       // 手动刷新全站冷却时间（秒），默认 60
   "frontend": {                      // 前端展示配置
     "title": "My API Status",        // 页面标题（同时用于 <title> 和 <h1>）
     "icon": "https://example.com/icon.png",  // favicon 和 logo，留空则不显示
@@ -70,6 +71,7 @@ go build -ldflags "-s -w" -o status-linux-amd64 .
 ```jsonc
 {
   "name": "OpenAI",              // 一级分组名
+  "manualRefresh": true,         // 是否支持手动刷新（可选，默认 false）
   "subGroups": [
     {
       "name": "GPT-4o",          // 二级分组名（页面上显示的模型名）
@@ -153,7 +155,8 @@ go build -ldflags "-s -w" -o status-linux-amd64 .
 |---|---|
 | `GET /` | 状态面板页面 |
 | `GET /api/status` | 状态数据（前端轮询） |
-| `GET /api/config` | 配置信息（interval + frontend） |
+| `GET /api/config` | 配置信息（interval + frontend + manualRefreshCooldown + groups） |
+| `POST /api/refresh` | 手动触发刷新检测（全站共享冷却） |
 | `GET /api/status-page/{slug}` | Uptime Kuma 兼容状态页 |
 | `GET /api/status-page/heartbeat/{slug}` | Uptime Kuma 兼容心跳数据 |
 
@@ -165,6 +168,7 @@ go build -ldflags "-s -w" -o status-linux-amd64 .
   "overall": { "status": "up", "label": "运行正常" },
   "last_completed_at": "2026-06-07T12:00:00Z",
   "checking": false,
+  "manual_refresh_remaining": 0,
   "sections": [
     {
       "name": "OpenAI",
@@ -187,17 +191,39 @@ go build -ldflags "-s -w" -o status-linux-amd64 .
 
 `status` 字段取值：`up` / `down` / `degraded` / `unknown`
 
+### `POST /api/refresh` 手动刷新
+
+手动触发一次全站检测刷新。全站共享冷却时间，冷却期内返回 429。
+
+```jsonc
+// 成功响应 (200)
+{ "ok": true, "cooldown": 60 }
+
+// 冷却中 (429)
+{ "error": "cooldown", "remaining": 45 }
+
+// 正在检测中 (409)
+{ "error": "already checking" }
+```
+
+冷却时间通过配置项 `manualRefreshCooldown` 设置（默认 60 秒）。在 `groups` 中为分组设置 `"manualRefresh": true` 后，该分组标题旁会显示刷新按钮。
+
 ### `/api/config` 响应结构
 
 ```jsonc
 {
   "interval": 60,
+  "manualRefreshCooldown": 60,
   "frontend": {
     "title": "My API Status",
     "icon": "https://example.com/icon.png",
     "subtitle": "...",
     "footer": "..."
-  }
+  },
+  "groups": [
+    { "name": "OpenAI", "manualRefresh": true },
+    { "name": "Google", "manualRefresh": false }
+  ]
 }
 ```
 
