@@ -899,6 +899,32 @@ func apiRefresh(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// apiIQ 代理 codexradar IQ 历史接口，避免浏览器跨域
+func apiIQ(w http.ResponseWriter, r *http.Request) {
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+	req, err := http.NewRequest("GET", "https://api.codexradar.com/api/v1/iq-history", nil)
+	if err != nil {
+		writeJSON(w, 502, map[string]string{"error": "build request failed: " + err.Error()})
+		return
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 go-status")
+	resp, err := client.Do(req)
+	if err != nil {
+		writeJSON(w, 502, map[string]string{"error": "upstream request failed: " + err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+	w.Header().Set("content-type", "application/json; charset=utf-8")
+	w.Header().Set("access-control-allow-origin", "*")
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
+}
+
 // /api/status-page/:slug — 原版 Uptime Kuma 公开状态页兼容
 func apiStatusPage(w http.ResponseWriter, r *http.Request) {
 	slug := strings.TrimPrefix(r.URL.Path, "/api/status-page/")
@@ -1132,6 +1158,7 @@ func main() {
 		}
 	}()
 
+	http.HandleFunc("/api/iq", apiIQ)
 	http.HandleFunc("/api/status", apiStatus)
 	http.HandleFunc("/api/config", apiConfig)
 	http.HandleFunc("/api/refresh", apiRefresh)

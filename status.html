@@ -115,10 +115,31 @@ h1::after{content:'';position:absolute;bottom:-8px;left:50%;transform:translateX
   .mark{width:8px;height:24px}
   .track{height:24px}
 }
+
+.iq-monitor{display:flex;align-items:center;height:100%;padding:0 16px;overflow-x:auto;overflow-y:hidden;white-space:nowrap;font-family:'Courier New',Consolas,monospace;gap:14px;scrollbar-width:thin}
+.iq-monitor::-webkit-scrollbar{height:3px}
+.iq-monitor::-webkit-scrollbar-thumb{background:rgba(0,0,0,.3)}
+.iq-monitor::-webkit-scrollbar-track{background:transparent}
+.iq-loading{color:rgba(0,0,0,.5);font-size:12px;font-weight:700}
+.iq-title{font-size:11px;font-weight:900;color:#000;letter-spacing:1px;flex-shrink:0;text-transform:uppercase;line-height:1.2}
+.iq-title small{display:block;font-size:9px;font-weight:700;color:rgba(0,0,0,.5);letter-spacing:0}
+.iq-sep{width:2px;height:36px;background:rgba(0,0,0,.2);flex-shrink:0}
+.iq-group{display:flex;align-items:center;gap:7px;flex-shrink:0}
+.iq-model{font-size:12px;font-weight:900;color:#000;background:rgba(0,0,0,.18);padding:2px 6px;letter-spacing:1px}
+.iq-base{font-size:22px;font-weight:900;color:#000;line-height:1}
+.iq-tier{display:inline-flex;align-items:baseline;gap:2px}
+.iq-tier-label{font-size:9px;font-weight:800;color:rgba(0,0,0,.55);text-transform:uppercase}
+.iq-tier-score{font-size:15px;font-weight:900;color:#000}
+@media(max-width:820px){
+  .iq-monitor{gap:10px;padding:0 10px}
+  .iq-title{font-size:10px}
+  .iq-base{font-size:18px}
+  .iq-tier-score{font-size:13px}
+}
 </style>
 </head>
 <body>
-<div class="top-bar"></div>
+<div class="top-bar"><div id="iqMonitor" class="iq-monitor"><span class="iq-loading">GPT 智商加载中...</span></div></div>
 <canvas id="pixel-canvas"></canvas>
 <div class="container">
   <div class="logo" id="logoWrap" style="display:none"><img id="logoImg" src="" alt="" /></div>
@@ -283,6 +304,8 @@ async function start(){
   await initFrontend();
   load();
   setInterval(load,20000);
+  loadIq();
+  setInterval(loadIq,60000);
 }
 
 function manualRefresh(btn){
@@ -331,6 +354,48 @@ function updateRefreshButtons(){
       btn.textContent='刷新';
     }
   });
+}
+// ===== GPT 实时智商监控 (独立模块，与后端无关联) =====
+const IQ_API='/api/iq';
+const IQ_LAYOUT=[
+  {model:'gpt-5.6-sol',name:'SOL',tiers:['ultra','max','xhigh']},
+  {model:'gpt-5.6-terra',name:'TERRA',tiers:['ultra','max','xhigh']},
+  {model:'gpt-5.6-luna',name:'LUNA',tiers:['max','xhigh','high']},
+  {model:'gpt-5.5',name:'5.5',tiers:['xhigh','high']},
+];
+const IQ_TIER_LABEL={low:'LOW',medium:'MED',high:'HIGH',max:'MAX',ultra:'ULTRA',xhigh:'XHIGH'};
+function iqLatestScore(data,key){
+  const arr=data[key];
+  if(!Array.isArray(arr)||!arr.length)return null;
+  const v=arr[arr.length-1];
+  return Number.isFinite(Number(v&&v.score))?Number(v.score):null;
+}
+function renderIq(data){
+  const el=document.getElementById('iqMonitor');
+  if(!el)return;
+  let html='<div class="iq-title">GPT 实时智商<small>codexradar</small></div><div class="iq-sep"></div>';
+  for(const g of IQ_LAYOUT){
+    const base=iqLatestScore(data,g.model);
+    const parts=[];
+    if(base!==null)parts.push('<span class="iq-base">'+base.toFixed(0)+'</span>');
+    for(const t of g.tiers){
+      const s=iqLatestScore(data,g.model+'@'+t);
+      if(s===null)continue;
+      parts.push('<span class="iq-tier"><span class="iq-tier-label">'+(IQ_TIER_LABEL[t]||t.toUpperCase())+'</span><span class="iq-tier-score">'+s.toFixed(0)+'</span></span>');
+    }
+    if(!parts.length)continue;
+    html+='<div class="iq-group"><span class="iq-model">'+g.name+'</span>'+parts.join('')+'</div><div class="iq-sep"></div>';
+  }
+  el.innerHTML=html;
+}
+async function loadIq(){
+  try{
+    const res=await fetch(IQ_API,{cache:'no-store'});
+    renderIq(await res.json());
+  }catch(err){
+    const el=document.getElementById('iqMonitor');
+    if(el&&el.children.length<2)el.innerHTML='<span class="iq-loading">GPT 智商获取失败</span>';
+  }
 }
 start();
 </script>
