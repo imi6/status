@@ -69,7 +69,7 @@ docker run -d --name status \
 
 在 `config.json` 同时设置 `adminPassword` 和 `adminPath` 后重启。后台地址是 `http://localhost:8080/` 加上 `adminPath`，例如 `adminPath` 为 `panel-9f3k2a` 时打开 `/panel-9f3k2a`。`/admin` 不会注册。路径至少 8 位，只能包含字母、数字、连字符和下划线，且不能使用 admin、login 这类常见词。状态页不显示入口。
 
-页面里可以添加、修改、删除分组、子组和模型（地址、密钥、协议、超时），也可以改检测间隔和页面文案。保存会写回 `config.json`，并自动开始一轮检测。修改路径或端口后需要再次重启。
+页面里可以添加、修改、删除分组、子组和模型（地址、密钥、协议、超时），也可以改检测间隔和页面文案。分组数据写入 `status.db`，保存后下一轮检测就会用新数据。站点标题、间隔、Kuma 仍写在 `config.json`。修改路径或端口后需要再次重启。
 
 公开的状态接口不会返回密钥和后台路径。`adminPassword` 或 `adminPath` 留空时后台关闭。
 

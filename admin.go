@@ -67,7 +67,12 @@ func updateConfig(mut func(*Config) error) error {
 		return err
 	}
 	normalizeConfig(&next)
-	if err := writeConfigFile(next); err != nil {
+	if err := saveMonitorGroups(next.Groups); err != nil {
+		return err
+	}
+	stored := next
+	stored.Groups = []Group{}
+	if err := writeConfigFile(stored); err != nil {
 		return err
 	}
 	cfg = next

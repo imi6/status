@@ -14,25 +14,5 @@
     "baseURL": "",
     "slug": ""
   },
-  "groups": [
-    {
-      "name": "Example Group",
-      "manualRefresh": true,
-      "subGroups": [
-        {
-          "name": "Example SubGroup",
-          "kumaSlug": "",
-          "models": [
-            {
-              "id": "model-id",
-              "provider": "openai-compat",
-              "baseURL": "https://api.example.com/v1",
-              "key": "sk-your-key-here",
-              "timeout": 30
-            }
-          ]
-        }
-      ]
-    }
-  ]
+  "groups": []
 }

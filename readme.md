@@ -69,7 +69,7 @@ The package is private after the first push. To allow public pulls, set it to Pu
 
 Set both `adminPassword` and `adminPath` in `config.json`, then restart. The admin URL is `http://localhost:8080/` plus `adminPath`. With `adminPath` set to `panel-9f3k2a`, open `/panel-9f3k2a`. `/admin` is not registered. The path must be 8 to 64 characters of letters, digits, hyphens, or underscores, and it cannot be a common name such as admin or login. The status page does not link to it.
 
-From the page you can add, edit, and delete groups, subgroups, and models (URL, key, protocol, timeout), and change the check interval and page text. Saving writes `config.json` and starts a check. A path or port change needs another restart.
+From the page you can add, edit, and delete groups, subgroups, and models (URL, key, protocol, timeout), and change the check interval and page text. Groups are stored in `status.db` and the next check uses them. Title, interval, and Kuma stay in `config.json`. A path or port change needs another restart.
 
 Public status endpoints do not return keys or the admin path. An empty `adminPassword` or `adminPath` disables the admin page.
 

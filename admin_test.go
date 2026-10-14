@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"database/sql"
 )
 
 func TestMain(m *testing.M) {
@@ -79,6 +81,19 @@ func TestAdminRoundTripHidesSecrets(t *testing.T) {
 		Groups:   []Group{},
 	}
 	if err := writeConfigFile(cfg); err != nil {
+		t.Fatal(err)
+	}
+	oldDB := db
+	opened, err := sql.Open("sqlite", filepath.Join(dir, "status.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db = opened
+	t.Cleanup(func() {
+		db.Close()
+		db = oldDB
+	})
+	if err := ensureSchema(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -162,15 +177,22 @@ func TestAdminRoundTripHidesSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(raw), "sk-test-key") {
-		t.Fatalf("config file missing key: %s", raw)
+	if strings.Contains(string(raw), "sk-test-key") {
+		t.Fatalf("config file still has key: %s", raw)
 	}
 	var saved Config
 	if err := json.Unmarshal(raw, &saved); err != nil {
 		t.Fatal(err)
 	}
-	if saved.AdminPassword != "secret" || len(saved.Groups) != 1 || saved.Groups[0].SubGroups[0].Models[0].Key != "sk-test-key" {
+	if saved.AdminPassword != "secret" || len(saved.Groups) != 0 {
 		t.Fatalf("saved = %+v", saved)
+	}
+	var key string
+	if err := db.QueryRow(`SELECT api_key FROM monitor_models WHERE model_id = ?`, "gpt").Scan(&key); err != nil {
+		t.Fatal(err)
+	}
+	if key != "sk-test-key" {
+		t.Fatalf("db key = %q", key)
 	}
 }
 

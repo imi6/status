@@ -125,6 +125,18 @@ func loadConfig() {
 		return
 	}
 	normalizeConfig(&newCfg)
+	if db != nil {
+		if ready, err := groupsReady(); err != nil {
+			log.Println("groups ready:", err)
+		} else if ready {
+			groups, err := loadMonitorGroups()
+			if err != nil {
+				log.Println("load groups:", err)
+			} else {
+				newCfg.Groups = groups
+			}
+		}
+	}
 	mu.Lock()
 	cfg = newCfg
 	mu.Unlock()
@@ -176,7 +188,13 @@ func initDB() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	_, err = db.Exec(`
+	if err := ensureSchema(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func ensureSchema() error {
+	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS checks (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			group_name TEXT NOT NULL,
@@ -188,10 +206,200 @@ func initDB() {
 		);
 		CREATE INDEX IF NOT EXISTS idx_checks_time ON checks(checked_at);
 		CREATE INDEX IF NOT EXISTS idx_checks_group ON checks(group_name, sub_name, model_id, checked_at);
+		CREATE TABLE IF NOT EXISTS monitor_groups (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL UNIQUE,
+			manual_refresh INTEGER NOT NULL DEFAULT 0,
+			sort_order INTEGER NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS monitor_subgroups (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			group_id INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			kuma_slug TEXT NOT NULL DEFAULT '',
+			sort_order INTEGER NOT NULL,
+			UNIQUE(group_id, name)
+		);
+		CREATE TABLE IF NOT EXISTS monitor_models (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			subgroup_id INTEGER NOT NULL,
+			model_id TEXT NOT NULL,
+			provider TEXT NOT NULL,
+			base_url TEXT NOT NULL,
+			api_key TEXT NOT NULL,
+			timeout INTEGER NOT NULL,
+			sort_order INTEGER NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS app_meta (
+			k TEXT PRIMARY KEY,
+			v TEXT NOT NULL
+		);
 	`)
+	return err
+}
+
+func groupsReady() (bool, error) {
+	var v string
+	err := db.QueryRow(`SELECT v FROM app_meta WHERE k = ?`, "groups_ready").Scan(&v)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return v == "1", nil
+}
+
+func loadMonitorGroups() ([]Group, error) {
+	rows, err := db.Query(`SELECT id, name, manual_refresh FROM monitor_groups ORDER BY sort_order, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var groups []Group
+	for rows.Next() {
+		var id, manual int
+		var name string
+		if err := rows.Scan(&id, &name, &manual); err != nil {
+			return nil, err
+		}
+		subs, err := loadMonitorSubgroups(id)
+		if err != nil {
+			return nil, err
+		}
+		groups = append(groups, Group{Name: name, ManualRefresh: manual == 1, SubGroups: subs})
+	}
+	if groups == nil {
+		groups = []Group{}
+	}
+	return groups, rows.Err()
+}
+
+func loadMonitorSubgroups(groupID int) ([]SubGroup, error) {
+	rows, err := db.Query(`SELECT id, name, kuma_slug FROM monitor_subgroups WHERE group_id = ? ORDER BY sort_order, id`, groupID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var subs []SubGroup
+	for rows.Next() {
+		var id int
+		var name, slug string
+		if err := rows.Scan(&id, &name, &slug); err != nil {
+			return nil, err
+		}
+		models, err := loadMonitorModels(id)
+		if err != nil {
+			return nil, err
+		}
+		subs = append(subs, SubGroup{Name: name, KumaSlug: slug, Models: models})
+	}
+	if subs == nil {
+		subs = []SubGroup{}
+	}
+	return subs, rows.Err()
+}
+
+func loadMonitorModels(subgroupID int) ([]Model, error) {
+	rows, err := db.Query(`SELECT model_id, provider, base_url, api_key, timeout FROM monitor_models WHERE subgroup_id = ? ORDER BY sort_order, id`, subgroupID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var models []Model
+	for rows.Next() {
+		var m Model
+		if err := rows.Scan(&m.ID, &m.Provider, &m.BaseURL, &m.Key, &m.Timeout); err != nil {
+			return nil, err
+		}
+		models = append(models, m)
+	}
+	if models == nil {
+		models = []Model{}
+	}
+	return models, rows.Err()
+}
+
+func saveMonitorGroups(groups []Group) error {
+	if db == nil {
+		return fmt.Errorf("数据库未就绪")
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM monitor_models`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM monitor_subgroups`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM monitor_groups`); err != nil {
+		return err
+	}
+	for i, g := range groups {
+		manual := 0
+		if g.ManualRefresh {
+			manual = 1
+		}
+		res, err := tx.Exec(`INSERT INTO monitor_groups (name, manual_refresh, sort_order) VALUES (?, ?, ?)`, g.Name, manual, i)
+		if err != nil {
+			return err
+		}
+		gid, err := res.LastInsertId()
+		if err != nil {
+			return err
+		}
+		for j, sg := range g.SubGroups {
+			res, err = tx.Exec(`INSERT INTO monitor_subgroups (group_id, name, kuma_slug, sort_order) VALUES (?, ?, ?, ?)`, gid, sg.Name, sg.KumaSlug, j)
+			if err != nil {
+				return err
+			}
+			sid, err := res.LastInsertId()
+			if err != nil {
+				return err
+			}
+			for k, m := range sg.Models {
+				if _, err := tx.Exec(`INSERT INTO monitor_models (subgroup_id, model_id, provider, base_url, api_key, timeout, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?)`, sid, m.ID, m.Provider, m.BaseURL, m.Key, m.Timeout, k); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	if _, err := tx.Exec(`INSERT INTO app_meta (k, v) VALUES ('groups_ready', '1') ON CONFLICT(k) DO UPDATE SET v = '1'`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func migrateGroups() {
+	ready, err := groupsReady()
 	if err != nil {
 		log.Fatal(err)
 	}
+	if !ready {
+		mu.RLock()
+		groups := append([]Group(nil), cfg.Groups...)
+		mu.RUnlock()
+		if err := saveMonitorGroups(groups); err != nil {
+			log.Fatal(err)
+		}
+		mu.Lock()
+		stored := cfg
+		stored.Groups = []Group{}
+		mu.Unlock()
+		if err := writeConfigFile(stored); err != nil {
+			log.Println("config strip groups:", err)
+		}
+	}
+	groups, err := loadMonitorGroups()
+	if err != nil {
+		log.Fatal(err)
+	}
+	mu.Lock()
+	cfg.Groups = groups
+	mu.Unlock()
 }
 
 func saveCheck(groupName, subName, modelID string, up bool, latency int) {
@@ -1187,6 +1395,7 @@ func serveAsset(w http.ResponseWriter, r *http.Request, name string) {
 func main() {
 	loadConfig()
 	initDB()
+	migrateGroups()
 
 	go func() {
 		refresh()
