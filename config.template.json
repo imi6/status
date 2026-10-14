@@ -2,6 +2,8 @@
   "port": 8080,
   "interval": 60,
   "manualRefreshCooldown": 60,
+  "adminPassword": "",
+  "adminPath": "",
   "frontend": {
     "title": "Service Status",
     "icon": "",

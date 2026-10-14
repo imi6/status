@@ -41,6 +41,38 @@ go build -ldflags "-s -w" -o status-linux-amd64 .
 
 Build output is a single executable + `status.html`. Just place them in the same directory to deploy.
 
+## Docker
+
+Pushes to `main`, and tags matching `v*`, build a `linux/amd64` image and publish it to `ghcr.io/imi6/status`. Pull requests build the image without pushing.
+
+```bash
+cp config.template.json config.json
+# Edit config.json, then start
+docker compose up -d
+```
+
+Without Compose:
+
+```bash
+docker run -d --name status \
+  -p 8080:8080 \
+  -v ./config.json:/data/config.json \
+  -v status-data:/data \
+  ghcr.io/imi6/status:latest
+```
+
+The container working directory is `/data`. `config.json` must be writable, because the admin page saves changes back to it. The SQLite file `status.db` is written in `/data` as well. The page file comes from the image. The published port follows `port` in the config, which defaults to `8080`.
+
+The package is private after the first push. To allow public pulls, set it to Public on the repository Packages page. If the Action cannot push, set Settings → Actions → General → Workflow permissions to Read and write permissions.
+
+## Admin
+
+Set both `adminPassword` and `adminPath` in `config.json`, then restart. The admin URL is `http://localhost:8080/` plus `adminPath`. With `adminPath` set to `panel-9f3k2a`, open `/panel-9f3k2a`. `/admin` is not registered. The path must be 8 to 64 characters of letters, digits, hyphens, or underscores, and it cannot be a common name such as admin or login. The status page does not link to it.
+
+From the page you can add, edit, and delete groups, subgroups, and models (URL, key, protocol, timeout), and change the check interval and page text. Saving writes `config.json` and starts a check. A path or port change needs another restart.
+
+Public status endpoints do not return keys or the admin path. An empty `adminPassword` or `adminPath` disables the admin page.
+
 ## Configuration
 
 Config file is `config.json`. See `config.template.json` for a template.
@@ -52,6 +84,8 @@ Config file is `config.json`. See `config.template.json` for a template.
   "port": 8080,                      // Listen port, default 8080, requires restart
   "interval": 60,                    // Check interval in seconds, default 60
   "manualRefreshCooldown": 60,       // Manual refresh cooldown in seconds (site-wide), default 60
+  "adminPassword": "",               // Admin password, empty disables the admin page
+  "adminPath": "",                   // Admin path segment, for example panel-9f3k2a; empty disables it
   "frontend": {                      // Frontend display config
     "title": "My API Status",        // Page title (used for both <title> and <h1>)
     "icon": "https://example.com/icon.png",  // Favicon and logo, empty to hide

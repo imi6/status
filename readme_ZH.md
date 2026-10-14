@@ -41,6 +41,38 @@ go build -ldflags "-s -w" -o status-linux-amd64 .
 
 编译产物为单个可执行文件 + `status.html`，部署时放在同目录即可。
 
+## Docker
+
+推送到 `main`，或推送 `v*` 标签时，GitHub Actions 会构建 `linux/amd64` 镜像，并发布到 `ghcr.io/imi6/status`。Pull Request 只构建、不推送。
+
+```bash
+cp config.template.json config.json
+# 编辑 config.json 后启动
+docker compose up -d
+```
+
+不用 compose 时：
+
+```bash
+docker run -d --name status \
+  -p 8080:8080 \
+  -v ./config.json:/data/config.json \
+  -v status-data:/data \
+  ghcr.io/imi6/status:latest
+```
+
+容器工作目录是 `/data`。`config.json` 必须可写，管理后台会把修改写回这个文件。SQLite 数据库 `status.db` 也写在 `/data`。页面文件来自镜像。对外端口跟配置里的 `port` 一致，默认 `8080`。
+
+镜像第一次推上去后默认是私有的。要公开拉取，到仓库的 Packages 页面把该包设为 Public。若 Action 推送失败，把仓库 Settings → Actions → General → Workflow permissions 设为 Read and write permissions。
+
+## 管理后台
+
+在 `config.json` 同时设置 `adminPassword` 和 `adminPath` 后重启。后台地址是 `http://localhost:8080/` 加上 `adminPath`，例如 `adminPath` 为 `panel-9f3k2a` 时打开 `/panel-9f3k2a`。`/admin` 不会注册。路径至少 8 位，只能包含字母、数字、连字符和下划线，且不能使用 admin、login 这类常见词。状态页不显示入口。
+
+页面里可以添加、修改、删除分组、子组和模型（地址、密钥、协议、超时），也可以改检测间隔和页面文案。保存会写回 `config.json`，并自动开始一轮检测。修改路径或端口后需要再次重启。
+
+公开的状态接口不会返回密钥和后台路径。`adminPassword` 或 `adminPath` 留空时后台关闭。
+
 ## 配置说明
 
 配置文件为 `config.json`，模板见 `config.template.json`。
@@ -52,6 +84,8 @@ go build -ldflags "-s -w" -o status-linux-amd64 .
   "port": 8080,                      // 监听端口，默认 8080，重启生效
   "interval": 60,                    // 检测间隔（秒），默认 60
   "manualRefreshCooldown": 60,       // 手动刷新全站冷却时间（秒），默认 60
+  "adminPassword": "",               // 管理后台密码，留空则关闭后台
+  "adminPath": "",                   // 后台目录名，例如 panel-9f3k2a，留空则不注册
   "frontend": {                      // 前端展示配置
     "title": "My API Status",        // 页面标题（同时用于 <title> 和 <h1>）
     "icon": "https://example.com/icon.png",  // favicon 和 logo，留空则不显示

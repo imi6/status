@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>管理后台</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  background:#0a0a0a;
+  color:#111;
+  min-height:100vh;
+  padding:28px 16px 48px;
+}
+.wrap{max-width:980px;margin:0 auto;background:#fff;border:4px solid #000;padding:28px 22px 36px}
+h1{font-size:28px;letter-spacing:2px;font-weight:800}
+.lead{margin-top:8px;color:#444;font-family:"Courier New",Consolas,monospace;font-size:13px}
+.top{display:flex;justify-content:space-between;gap:16px;align-items:flex-end;border-bottom:4px solid #000;padding-bottom:16px;margin-bottom:18px}
+.links{display:flex;gap:8px;flex-wrap:wrap}
+a.btn,button{
+  font-family:"Courier New",Consolas,monospace;
+  font-size:12px;font-weight:800;letter-spacing:.5px;
+  background:#32f08c;color:#000;border:2px solid #000;
+  padding:6px 12px;cursor:pointer;text-decoration:none;display:inline-block;
+}
+button.ghost,a.ghost{background:#fff}
+button.warn{background:#e74c3c;color:#fff}
+button:disabled{background:#ccc;color:#666;cursor:not-allowed}
+.msg{margin:12px 0;padding:10px 12px;border:2px solid #000;font-family:"Courier New",Consolas,monospace;font-size:13px;background:#f6fff9}
+.msg.err{background:#fff1f0}
+.card{border:3px solid #000;padding:14px;margin-top:14px}
+.card h2{font-size:15px;font-family:"Courier New",Consolas,monospace;text-transform:uppercase;margin-bottom:12px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px 14px}
+label{display:flex;flex-direction:column;gap:6px;font-size:12px;font-weight:800;font-family:"Courier New",Consolas,monospace}
+label.wide{grid-column:1 / -1}
+input,select,textarea{
+  font:14px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  border:2px solid #000;padding:8px 10px;background:#fff;width:100%;
+}
+textarea{min-height:72px;resize:vertical}
+.row-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;align-items:center}
+.hint{color:#555;font-size:12px;font-family:"Courier New",Consolas,monospace;margin-top:8px}
+.check{flex-direction:row;align-items:center;gap:8px}
+.check input{width:auto}
+.group{border-top:3px solid #000;padding-top:14px;margin-top:14px}
+.group-head,.sub-head,.model{
+  display:flex;justify-content:space-between;gap:12px;align-items:flex-start;
+}
+.group-head h3{font-size:18px}
+.subgroup{margin-top:12px;padding:12px;background:#f7f7f7;border:2px solid #000}
+.sub-head h4{font-size:15px}
+.meta{color:#555;font-size:12px;font-family:"Courier New",Consolas,monospace;margin-top:4px}
+.model{border-top:1px solid #ccc;padding:10px 0;align-items:center}
+.model:first-of-type{border-top:0}
+.model b{display:block}
+.model span{color:#444;font-size:12px;font-family:"Courier New",Consolas,monospace}
+.login{max-width:420px;margin:40px auto}
+.keyline{display:flex;gap:8px;align-items:center}
+.keyline input{flex:1}
+.empty{color:#555;font-family:"Courier New",Consolas,monospace;padding:8px 0}
+@media(max-width:720px){
+  .grid{grid-template-columns:1fr}
+  .top,.group-head,.sub-head,.model{flex-direction:column}
+  .wrap{padding:18px 14px 28px}
+  h1{font-size:22px}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div id="disabled" hidden>
+    <h1>管理后台未开启</h1>
+    <p class="lead">在 config.json 中设置 adminPath 和 adminPassword 后，用该路径打开本页。不要使用 /admin。密码留空或路径留空时后台不会注册。</p>
+  </div>
+
+  <form id="login" class="login" hidden>
+    <h1>管理后台</h1>
+    <p class="lead">使用 config.json 里的 adminPassword 登录。</p>
+    <input name="username" autocomplete="username" value="admin" hidden>
+    <label style="margin-top:16px">密码
+      <input id="loginPassword" type="password" autocomplete="current-password" required>
+    </label>
+    <div class="row-actions"><button type="submit">登录</button><a class="btn ghost" href="/">返回状态页</a></div>
+    <p id="loginMsg" class="msg err" hidden></p>
+  </form>
+
+  <div id="app" hidden>
+    <div class="top">
+      <div>
+        <h1>管理后台</h1>
+        <p class="lead">添加和修改模型地址、密钥。保存后写回 config.json。</p>
+      </div>
+      <div class="links">
+        <a class="btn ghost" href="/">状态页</a>
+        <button type="button" class="ghost" id="logoutBtn">退出</button>
+      </div>
+    </div>
+    <p id="msg" class="msg" hidden></p>
+
+    <section class="card">
+      <h2>站点</h2>
+      <form id="settingsForm">
+        <div class="grid">
+          <label>标题<input name="title" required></label>
+          <label>副标题<input name="subtitle"></label>
+          <label class="wide">图标地址<input name="icon" spellcheck="false"></label>
+          <label>检测间隔（秒）<input name="interval" type="number" min="5" max="86400" required></label>
+          <label>手动刷新冷却（秒）<input name="cooldown" type="number" min="5" max="86400" required></label>
+          <label>监听端口<input name="port" type="number" min="1" max="65535" required></label>
+          <label>后台路径<input name="adminPath" required minlength="8" maxlength="64" spellcheck="false" pattern="[A-Za-z0-9_-]{8,64}" placeholder="例如 panel-9f3k2a"></label>
+          <label>Kuma 地址<input name="kumaBase" spellcheck="false" placeholder="https://status.example.com"></label>
+          <label>Kuma Slug<input name="kumaSlug" spellcheck="false"></label>
+          <label class="wide">页脚 HTML<textarea name="footer"></textarea></label>
+        </div>
+        <p class="hint">后台路径就是地址里的目录名，不要用 admin 这种常见词。修改路径或端口后需要重启进程。状态页不会显示这个入口。</p>
+        <div class="row-actions"><button type="submit">保存站点设置</button></div>
+      </form>
+    </section>
+
+    <section class="card">
+      <h2>后台密码</h2>
+      <form id="passwordForm" autocomplete="off">
+        <div class="grid">
+          <label>当前密码<input name="current" type="password" autocomplete="current-password" required></label>
+          <label>新密码<input name="next" type="password" autocomplete="new-password" required minlength="6"></label>
+        </div>
+        <div class="row-actions"><button type="submit">修改密码</button></div>
+      </form>
+    </section>
+
+    <section class="card">
+      <h2>模型</h2>
+      <div class="row-actions"><button type="button" id="addGroupBtn">添加分组</button></div>
+
+      <form id="groupForm" class="card" hidden autocomplete="off">
+        <h2 id="groupFormTitle">添加分组</h2>
+        <div class="grid">
+          <label class="wide">分组名称<input name="name" required></label>
+          <label class="check"><input name="manualRefresh" type="checkbox">显示手动刷新按钮</label>
+        </div>
+        <div class="row-actions">
+          <button type="submit">保存</button>
+          <button type="button" class="ghost" data-close="groupForm">取消</button>
+        </div>
+      </form>
+
+      <form id="subForm" class="card" hidden autocomplete="off">
+        <h2 id="subFormTitle">添加子组</h2>
+        <div class="grid">
+          <label>子组名称<input name="name" required></label>
+          <label>Kuma slug<input name="kumaSlug" spellcheck="false"></label>
+        </div>
+        <p class="hint">子组名称会显示在状态页上。</p>
+        <div class="row-actions">
+          <button type="submit">保存</button>
+          <button type="button" class="ghost" data-close="subForm">取消</button>
+        </div>
+      </form>
+
+      <form id="modelForm" class="card" hidden autocomplete="off">
+        <h2 id="modelFormTitle">添加模型</h2>
+        <div class="grid">
+          <label>模型 ID<input name="id" required spellcheck="false"></label>
+          <label>协议
+            <select name="provider">
+              <option value="openai-compat">OpenAI 兼容</option>
+              <option value="openai-response">OpenAI Responses</option>
+              <option value="google">Google Gemini</option>
+              <option value="anthropic">Anthropic</option>
+            </select>
+          </label>
+          <label class="wide">地址<input name="baseURL" required spellcheck="false" placeholder="https://api.example.com/v1"></label>
+          <label class="wide">密钥
+            <span class="keyline">
+              <input name="key" type="password" autocomplete="new-password" spellcheck="false">
+              <button type="button" class="ghost" id="toggleKey">显示</button>
+            </span>
+          </label>
+          <label>超时（秒）<input name="timeout" type="number" min="1" max="300" value="30" required></label>
+        </div>
+        <p class="hint" id="keyHint" hidden>留空则保持原密钥。</p>
+        <div class="row-actions">
+          <button type="submit">保存</button>
+          <button type="button" class="ghost" data-close="modelForm">取消</button>
+        </div>
+      </form>
+
+      <div id="groups"></div>
+    </section>
+  </div>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+let state = null;
+let editing = null;
+
+function escapeHtml(t){
+  return String(t).replace(/[&<>'"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
+}
+function showMsg(text, err){
+  const el = $('msg');
+  el.hidden = !text;
+  el.textContent = text || '';
+  el.className = err ? 'msg err' : 'msg';
+}
+function providerLabel(p){
+  return { 'openai-compat':'OpenAI 兼容', 'openai-response':'OpenAI Responses', google:'Google Gemini', anthropic:'Anthropic' }[p] || p || 'OpenAI 兼容';
+}
+function maskKey(k){
+  if (!k) return '未设置密钥';
+  if (k.length <= 4) return '密钥已设置';
+  return '密钥 ····' + k.slice(-4);
+}
+async function api(path, opt){
+  opt = opt || {};
+  const base = location.pathname.replace(/\/+$/, '');
+  if (path.indexOf('/api/admin/') === 0) path = base + '/api/' + path.slice('/api/admin/'.length);
+  const res = await fetch(path, {
+    method: opt.method || 'GET',
+    headers: opt.body ? {'content-type':'application/json'} : undefined,
+    body: opt.body ? JSON.stringify(opt.body) : undefined
+  });
+  let data = {};
+  try { data = await res.json(); } catch (e) {}
+  if (!res.ok) throw new Error(data.error || ('请求失败 ' + res.status));
+  return data;
+}
+function hideForms(){
+  $('groupForm').hidden = true;
+  $('subForm').hidden = true;
+  $('modelForm').hidden = true;
+}
+function fillSettings(){
+  const f = $('settingsForm');
+  const front = state.frontend || {};
+  const kuma = state.kuma || {};
+  f.title.value = front.title || '';
+  f.subtitle.value = front.subtitle || '';
+  f.icon.value = front.icon || '';
+  f.footer.value = front.footer || '';
+  f.interval.value = state.interval || 60;
+  f.cooldown.value = state.manualRefreshCooldown || 60;
+  f.port.value = state.port || 8080;
+  f.adminPath.value = state.adminPath || '';
+  f.kumaBase.value = kuma.baseURL || '';
+  f.kumaSlug.value = kuma.slug || '';
+}
+function render(){
+  const root = $('groups');
+  const groups = state.groups || [];
+  if (!groups.length){
+    root.innerHTML = '<p class="empty">还没有分组。</p>';
+    return;
+  }
+  root.innerHTML = groups.map(g => {
+    const subs = g.subGroups || [];
+    const subHtml = subs.length ? subs.map(sg => {
+      const models = sg.models || [];
+      const modelHtml = models.length ? models.map((m, mi) => (
+        '<div class="model"><div><b>' + escapeHtml(m.id) + '</b><span>' + escapeHtml(providerLabel(m.provider)) + ' · ' + escapeHtml(m.baseURL || '') + ' · ' + escapeHtml(maskKey(m.key)) + ' · ' + (m.timeout || 30) + 's</span></div><div class="links"><button type="button" data-act="edit-model" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '" data-index="' + mi + '">编辑</button> <button type="button" class="warn" data-act="del-model" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '" data-index="' + mi + '">删除</button></div></div>'
+      )).join('') : '<p class="empty">此子组还没有模型。</p>';
+      return '<div class="subgroup"><div class="sub-head"><div><h4>' + escapeHtml(sg.name) + '</h4><div class="meta">' + (sg.kumaSlug ? ('Kuma ' + escapeHtml(sg.kumaSlug)) : '未设置独立 Kuma') + '</div></div><div class="links"><button type="button" data-act="add-model" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '">添加模型</button> <button type="button" data-act="edit-sub" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '">编辑</button> <button type="button" class="warn" data-act="del-sub" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '">删除</button></div></div>' + modelHtml + '</div>';
+    }).join('') : '<p class="empty">此分组还没有子组。</p>';
+    return '<section class="group"><div class="group-head"><div><h3>' + escapeHtml(g.name) + '</h3><div class="meta">' + (g.manualRefresh ? '显示手动刷新' : '无手动刷新') + '</div></div><div class="links"><button type="button" data-act="add-sub" data-group="' + escapeHtml(g.name) + '">添加子组</button> <button type="button" data-act="edit-group" data-group="' + escapeHtml(g.name) + '">编辑</button> <button type="button" class="warn" data-act="del-group" data-group="' + escapeHtml(g.name) + '">删除</button></div></div>' + subHtml + '</section>';
+  }).join('');
+}
+async function reload(message){
+  state = await api('/api/admin/config');
+  fillSettings();
+  render();
+  if (message) showMsg(message, false);
+}
+function findGroup(name){ return (state.groups || []).find(g => g.name === name); }
+function findSub(group, name){
+  const g = findGroup(group);
+  return g && (g.subGroups || []).find(sg => sg.name === name);
+}
+
+$('login').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  $('loginMsg').hidden = true;
+  try {
+    await api('/api/admin/login', {method:'POST', body:{password:$('loginPassword').value}});
+    $('login').hidden = true;
+    $('app').hidden = false;
+    await reload('');
+    showMsg('', false);
+  } catch (err) {
+    $('loginMsg').hidden = false;
+    $('loginMsg').textContent = err.message;
+  }
+});
+$('logoutBtn').addEventListener('click', async () => {
+  await api('/api/admin/logout', {method:'POST'}).catch(() => {});
+  location.reload();
+});
+$('settingsForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  try {
+    await api('/api/admin/settings', {method:'PUT', body:{
+      port: Number(f.port.value),
+      adminPath: f.adminPath.value,
+      interval: Number(f.interval.value),
+      manualRefreshCooldown: Number(f.cooldown.value),
+      frontend: {title:f.title.value, subtitle:f.subtitle.value, icon:f.icon.value, footer:f.footer.value},
+      kuma: {baseURL:f.kumaBase.value, slug:f.kumaSlug.value}
+    }});
+    await reload('站点设置已保存。');
+  } catch (err) { showMsg(err.message, true); }
+});
+$('passwordForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  try {
+    await api('/api/admin/password', {method:'POST', body:{current:f.current.value, next:f.next.value}});
+    f.reset();
+    showMsg('密码已更新。', false);
+  } catch (err) { showMsg(err.message, true); }
+});
+$('addGroupBtn').addEventListener('click', () => {
+  hideForms();
+  editing = {mode:'create'};
+  const f = $('groupForm');
+  f.hidden = false;
+  $('groupFormTitle').textContent = '添加分组';
+  f.name.value = '';
+  f.manualRefresh.checked = false;
+  f.name.focus();
+});
+$('groupForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  const manualRefresh = f.manualRefresh.checked;
+  try {
+    if (editing.mode === 'create') {
+      await api('/api/admin/groups', {method:'POST', body:{name:f.name.value, manualRefresh}});
+    } else {
+      await api('/api/admin/groups', {method:'PUT', body:{name:editing.original, newName:f.name.value, manualRefresh}});
+    }
+    hideForms();
+    await reload('分组已保存，并已安排检测。');
+  } catch (err) { showMsg(err.message, true); }
+});
+$('subForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  try {
+    if (editing.mode === 'create') {
+      await api('/api/admin/subgroups', {method:'POST', body:{group:editing.group, name:f.name.value, kumaSlug:f.kumaSlug.value}});
+    } else {
+      await api('/api/admin/subgroups', {method:'PUT', body:{group:editing.group, name:editing.original, newName:f.name.value, kumaSlug:f.kumaSlug.value}});
+    }
+    hideForms();
+    await reload('子组已保存，并已安排检测。');
+  } catch (err) { showMsg(err.message, true); }
+});
+$('modelForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  const model = {id:f.id.value, provider:f.provider.value, baseURL:f.baseURL.value, key:f.key.value, timeout:Number(f.timeout.value || 30)};
+  if (editing.mode === 'create' && !model.key.trim()) { showMsg('密钥不能为空', true); return; }
+  try {
+    if (editing.mode === 'create') {
+      await api('/api/admin/models', {method:'POST', body:{group:editing.group, subgroup:editing.sub, model}});
+    } else {
+      await api('/api/admin/models', {method:'PUT', body:{group:editing.group, subgroup:editing.sub, index:editing.index, model}});
+    }
+    hideForms();
+    await reload('模型已保存，并已安排检测。');
+  } catch (err) { showMsg(err.message, true); }
+});
+$('toggleKey').addEventListener('click', () => {
+  const input = $('modelForm').key;
+  const show = input.type === 'password';
+  input.type = show ? 'text' : 'password';
+  $('toggleKey').textContent = show ? '隐藏' : '显示';
+});
+document.querySelectorAll('[data-close]').forEach(btn => {
+  btn.addEventListener('click', () => { $(btn.dataset.close).hidden = true; });
+});
+$('groups').addEventListener('click', (e) => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  const group = btn.dataset.group;
+  const sub = btn.dataset.sub;
+  const act = btn.dataset.act;
+  if (act === 'edit-group') {
+    const g = findGroup(group);
+    if (!g) return;
+    hideForms();
+    editing = {mode:'edit', original:g.name};
+    const f = $('groupForm');
+    f.hidden = false;
+    $('groupFormTitle').textContent = '编辑分组';
+    f.name.value = g.name;
+    f.manualRefresh.checked = !!g.manualRefresh;
+    f.scrollIntoView({block:'center'});
+  } else if (act === 'del-group') {
+    if (!confirm('删除分组「' + group + '」及其全部子组和模型？')) return;
+    api('/api/admin/groups', {method:'DELETE', body:{name:group}}).then(() => reload('分组已删除。')).catch(err => showMsg(err.message, true));
+  } else if (act === 'add-sub') {
+    hideForms();
+    editing = {mode:'create', group};
+    const f = $('subForm');
+    f.hidden = false;
+    $('subFormTitle').textContent = '添加子组';
+    f.name.value = '';
+    f.kumaSlug.value = '';
+    f.scrollIntoView({block:'center'});
+    f.name.focus();
+  } else if (act === 'edit-sub') {
+    const sg = findSub(group, sub);
+    if (!sg) return;
+    hideForms();
+    editing = {mode:'edit', group, original:sg.name};
+    const f = $('subForm');
+    f.hidden = false;
+    $('subFormTitle').textContent = '编辑子组';
+    f.name.value = sg.name;
+    f.kumaSlug.value = sg.kumaSlug || '';
+    f.scrollIntoView({block:'center'});
+  } else if (act === 'del-sub') {
+    if (!confirm('删除子组「' + sub + '」及其模型？')) return;
+    api('/api/admin/subgroups', {method:'DELETE', body:{group, name:sub}}).then(() => reload('子组已删除。')).catch(err => showMsg(err.message, true));
+  } else if (act === 'add-model') {
+    hideForms();
+    editing = {mode:'create', group, sub};
+    const f = $('modelForm');
+    f.hidden = false;
+    $('modelFormTitle').textContent = '添加模型';
+    $('keyHint').hidden = true;
+    f.id.value = '';
+    f.provider.value = 'openai-compat';
+    f.baseURL.value = '';
+    f.key.value = '';
+    f.key.type = 'password';
+    $('toggleKey').textContent = '显示';
+    f.timeout.value = '30';
+    f.scrollIntoView({block:'center'});
+    f.id.focus();
+  } else if (act === 'edit-model') {
+    const sg = findSub(group, sub);
+    const m = sg && (sg.models || [])[Number(btn.dataset.index)];
+    if (!m) return;
+    hideForms();
+    editing = {mode:'edit', group, sub, index:Number(btn.dataset.index)};
+    const f = $('modelForm');
+    f.hidden = false;
+    $('modelFormTitle').textContent = '编辑模型';
+    $('keyHint').hidden = false;
+    f.id.value = m.id || '';
+    f.provider.value = m.provider || 'openai-compat';
+    f.baseURL.value = m.baseURL || '';
+    f.key.value = m.key || '';
+    f.key.type = 'password';
+    $('toggleKey').textContent = '显示';
+    f.timeout.value = String(m.timeout || 30);
+    f.scrollIntoView({block:'center'});
+  } else if (act === 'del-model') {
+    if (!confirm('删除这个模型？')) return;
+    api('/api/admin/models', {method:'DELETE', body:{group, subgroup:sub, index:Number(btn.dataset.index)}}).then(() => reload('模型已删除。')).catch(err => showMsg(err.message, true));
+  }
+});
+
+async function boot(){
+  try {
+    const s = await api('/api/admin/session');
+    if (!s.enabled) { $('disabled').hidden = false; return; }
+    if (!s.ok) { $('login').hidden = false; return; }
+    $('app').hidden = false;
+    await reload('');
+    showMsg('', false);
+  } catch (err) {
+    $('disabled').hidden = false;
+    $('disabled').querySelector('.lead').textContent = err.message;
+  }
+}
+boot();
+</script>
+</body>
+</html>

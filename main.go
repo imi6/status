@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,6 +32,8 @@ type Config struct {
 	Port                  int            `json:"port"`
 	Interval              int            `json:"interval"`
 	ManualRefreshCooldown int            `json:"manualRefreshCooldown"` // 手动刷新全站冷却时间（秒），默认60
+	AdminPassword         string         `json:"adminPassword"`         // 管理后台密码，留空则关闭后台
+	AdminPath             string         `json:"adminPath"`             // 后台路径名，留空则不注册入口
 	Frontend              FrontendConfig `json:"frontend"`
 	Kuma                  KumaConfig     `json:"kuma"`
 	Groups                []Group        `json:"groups"`
@@ -99,17 +102,19 @@ type StatusRespV2 struct {
 }
 
 var (
-	cfg              Config
-	mu               sync.RWMutex
-	statusV2         StatusRespV2
-	db               *sql.DB
-	checking         bool
+	cfg               Config
+	mu                sync.RWMutex
+	statusV2          StatusRespV2
+	db                *sql.DB
+	checking          bool
 	lastManualRefresh time.Time
-	manualRefreshMu  sync.RWMutex
+	manualRefreshMu   sync.RWMutex
 )
 
+var configPath = "config.json"
+
 func loadConfig() {
-	b, err := os.ReadFile("config.json")
+	b, err := os.ReadFile(configPath)
 	if err != nil {
 		log.Println("config read error:", err)
 		return
@@ -119,30 +124,50 @@ func loadConfig() {
 		log.Println("config parse error:", err)
 		return
 	}
-	if newCfg.Port == 0 {
-		newCfg.Port = 8080
-	}
-	if newCfg.Interval == 0 {
-		newCfg.Interval = 60
-	}
-	if newCfg.ManualRefreshCooldown == 0 {
-		newCfg.ManualRefreshCooldown = 60
-	}
-	if newCfg.Frontend.Title == "" {
-		newCfg.Frontend.Title = "Service Status"
-	}
-	if newCfg.Frontend.Footer == "" {
-		newCfg.Frontend.Footer = "Powered by go-status"
-	}
-	if newCfg.Frontend.Title == "" {
-		newCfg.Frontend.Title = "Service Status"
-	}
-	if newCfg.Frontend.Footer == "" {
-		newCfg.Frontend.Footer = "Powered by go-status"
-	}
+	normalizeConfig(&newCfg)
 	mu.Lock()
 	cfg = newCfg
 	mu.Unlock()
+}
+
+func normalizeConfig(c *Config) {
+	if c.Port == 0 {
+		c.Port = 8080
+	}
+	if c.Interval == 0 {
+		c.Interval = 60
+	}
+	if c.ManualRefreshCooldown == 0 {
+		c.ManualRefreshCooldown = 60
+	}
+	if c.Frontend.Title == "" {
+		c.Frontend.Title = "Service Status"
+	}
+	if c.Frontend.Footer == "" {
+		c.Frontend.Footer = "Powered by go-status"
+	}
+	if c.Groups == nil {
+		c.Groups = []Group{}
+	}
+	for i := range c.Groups {
+		if c.Groups[i].SubGroups == nil {
+			c.Groups[i].SubGroups = []SubGroup{}
+		}
+		for j := range c.Groups[i].SubGroups {
+			if c.Groups[i].SubGroups[j].Models == nil {
+				c.Groups[i].SubGroups[j].Models = []Model{}
+			}
+			for k := range c.Groups[i].SubGroups[j].Models {
+				m := &c.Groups[i].SubGroups[j].Models[k]
+				if m.Provider == "" {
+					m.Provider = "openai-compat"
+				}
+				if m.Timeout <= 0 {
+					m.Timeout = 30
+				}
+			}
+		}
+	}
 }
 
 func initDB() {
@@ -1143,6 +1168,22 @@ func apiStatusPageHeartbeat(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func serveAsset(w http.ResponseWriter, r *http.Request, name string) {
+	candidates := []string{name, filepath.Join("/opt/status", name)}
+	if exe, err := os.Executable(); err == nil {
+		candidates = append(candidates, filepath.Join(filepath.Dir(exe), name))
+	}
+	for _, p := range candidates {
+		st, err := os.Stat(p)
+		if err == nil && !st.IsDir() {
+			w.Header().Set("cache-control", "no-store")
+			http.ServeFile(w, r, p)
+			return
+		}
+	}
+	http.NotFound(w, r)
+}
+
 func main() {
 	loadConfig()
 	initDB()
@@ -1164,8 +1205,15 @@ func main() {
 	http.HandleFunc("/api/refresh", apiRefresh)
 	http.HandleFunc("/api/status-page/heartbeat/", apiStatusPageHeartbeat)
 	http.HandleFunc("/api/status-page/", apiStatusPage)
+	if base, err := mountAdmin(http.DefaultServeMux, cfg.AdminPath); err != nil {
+		log.Println("admin disabled:", err)
+	} else if base == "" {
+		log.Println("admin disabled: set adminPath in config.json")
+	} else {
+		log.Printf("admin at http://127.0.0.1:%d%s", cfg.Port, base)
+	}
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "status.html")
+		serveAsset(w, r, "status.html")
 	})
 
 	addr := fmt.Sprintf(":%d", cfg.Port)

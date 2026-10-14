@@ -1,0 +1,11 @@
+.git
+.github
+config.json
+*.db
+*.exe
+status-linux-amd64
+status
+img
+LICENSE
+readme.md
+readme_ZH.md
