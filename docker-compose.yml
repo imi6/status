@@ -1,14 +1,8 @@
 services:
   status:
     image: ghcr.io/imi6/status:latest
-    # 仓库里直接启动时用当前源码构建。只拉取已发布镜像时，删掉下面这一行。
-    build: .
     ports:
       - "8080:8080"
     volumes:
-      - ./config.json:/data/config.json
-      - status-data:/data
+      - /www/wwwroot/zzshu.si:/data
     restart: unless-stopped
-
-volumes:
-  status-data:
