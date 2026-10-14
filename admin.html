@@ -57,7 +57,7 @@ textarea{min-height:72px;resize:vertical}
 .model span{color:#444;font-size:12px;font-family:"Courier New",Consolas,monospace}
 .login{max-width:420px;margin:40px auto}
 .keyline{display:flex;gap:8px;align-items:center}
-.keyline input{flex:1}
+.keyline input,.keyline select{flex:1;min-width:0}
 .empty{color:#555;font-family:"Courier New",Consolas,monospace;padding:8px 0}
 @media(max-width:720px){
   .grid{grid-template-columns:1fr}
@@ -161,7 +161,6 @@ textarea{min-height:72px;resize:vertical}
       <form id="modelForm" class="card" hidden autocomplete="off">
         <h2 id="modelFormTitle">添加模型</h2>
         <div class="grid">
-          <label>模型 ID<input name="id" required spellcheck="false"></label>
           <label>协议
             <select name="provider">
               <option value="openai-compat">OpenAI 兼容</option>
@@ -170,6 +169,7 @@ textarea{min-height:72px;resize:vertical}
               <option value="anthropic">Anthropic</option>
             </select>
           </label>
+          <label>超时（秒）<input name="timeout" type="number" min="1" max="300" value="30" required></label>
           <label class="wide">地址<input name="baseURL" required spellcheck="false" placeholder="https://api.example.com/v1"></label>
           <label class="wide">密钥
             <span class="keyline">
@@ -177,9 +177,17 @@ textarea{min-height:72px;resize:vertical}
               <button type="button" class="ghost" id="toggleKey">显示</button>
             </span>
           </label>
-          <label>超时（秒）<input name="timeout" type="number" min="1" max="300" value="30" required></label>
+          <label class="wide">模型
+            <span class="keyline">
+              <select name="id" required>
+                <option value="">先获取可探测的模型</option>
+              </select>
+              <button type="button" class="ghost" id="loadModels">获取模型</button>
+            </span>
+          </label>
         </div>
-        <p class="hint" id="keyHint" hidden>留空则保持原密钥。</p>
+        <p class="hint">先填地址和密钥，再获取模型。列表来自该地址的 /models，探测使用选中的名称。</p>
+        <p class="hint" id="keyHint" hidden>编辑时密钥留空会继续用原来的密钥获取模型。</p>
         <div class="row-actions">
           <button type="submit">保存</button>
           <button type="button" class="ghost" data-close="modelForm">取消</button>
@@ -360,6 +368,7 @@ $('modelForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const f = e.target;
   const model = {id:f.id.value, provider:f.provider.value, baseURL:f.baseURL.value, key:f.key.value, timeout:Number(f.timeout.value || 30)};
+  if (!model.id.trim()) { showMsg('请先获取并选择模型', true); return; }
   if (editing.mode === 'create' && !model.key.trim()) { showMsg('密钥不能为空', true); return; }
   try {
     if (editing.mode === 'create') {
@@ -371,6 +380,49 @@ $('modelForm').addEventListener('submit', async (e) => {
     await reload('模型已保存，并已安排检测。');
   } catch (err) { showMsg(err.message, true); }
 });
+function resetModelSelect(selected){
+  const sel = $('modelForm').id;
+  if (selected) {
+    sel.innerHTML = '<option value="' + escapeHtml(selected) + '">' + escapeHtml(selected) + '</option>';
+    sel.value = selected;
+    return;
+  }
+  sel.innerHTML = '<option value="">先获取可探测的模型</option>';
+}
+async function loadModelOptions(preferred){
+  const f = $('modelForm');
+  const btn = $('loadModels');
+  btn.disabled = true;
+  btn.textContent = '获取中';
+  try {
+    const data = await api('/api/admin/upstream-models', {method:'POST', body:{
+      provider: f.provider.value,
+      baseURL: f.baseURL.value,
+      key: f.key.value,
+      group: editing && editing.group || '',
+      subgroup: editing && editing.sub || '',
+      index: editing && editing.mode === 'edit' ? editing.index : -1
+    }});
+    const models = Array.isArray(data.models) ? data.models : [];
+    const keep = preferred || f.id.value;
+    const list = models.slice();
+    if (keep && list.indexOf(keep) < 0) list.unshift(keep);
+    if (!list.length) {
+      resetModelSelect('');
+      showMsg('接口没有返回可选模型', true);
+      return;
+    }
+    f.id.innerHTML = list.map(id => '<option value="' + escapeHtml(id) + '">' + escapeHtml(id) + '</option>').join('');
+    f.id.value = keep && list.indexOf(keep) >= 0 ? keep : list[0];
+    showMsg('已获取 ' + models.length + ' 个模型', false);
+  } catch (err) {
+    showMsg(err.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '获取模型';
+  }
+}
+$('loadModels').addEventListener('click', () => { loadModelOptions(''); });
 $('toggleKey').addEventListener('click', () => {
   const input = $('modelForm').key;
   const show = input.type === 'password';
@@ -431,7 +483,7 @@ $('groups').addEventListener('click', (e) => {
     f.hidden = false;
     $('modelFormTitle').textContent = '添加模型';
     $('keyHint').hidden = true;
-    f.id.value = '';
+    resetModelSelect('');
     f.provider.value = 'openai-compat';
     f.baseURL.value = '';
     f.key.value = '';
@@ -439,7 +491,7 @@ $('groups').addEventListener('click', (e) => {
     $('toggleKey').textContent = '显示';
     f.timeout.value = '30';
     f.scrollIntoView({block:'center'});
-    f.id.focus();
+    f.baseURL.focus();
   } else if (act === 'edit-model') {
     const sg = findSub(group, sub);
     const m = sg && (sg.models || [])[Number(btn.dataset.index)];
@@ -450,7 +502,7 @@ $('groups').addEventListener('click', (e) => {
     f.hidden = false;
     $('modelFormTitle').textContent = '编辑模型';
     $('keyHint').hidden = false;
-    f.id.value = m.id || '';
+    resetModelSelect(m.id || '');
     f.provider.value = m.provider || 'openai-compat';
     f.baseURL.value = m.baseURL || '';
     f.key.value = m.key || '';
@@ -458,6 +510,7 @@ $('groups').addEventListener('click', (e) => {
     $('toggleKey').textContent = '显示';
     f.timeout.value = String(m.timeout || 30);
     f.scrollIntoView({block:'center'});
+    loadModelOptions(m.id || '');
   } else if (act === 'del-model') {
     if (!confirm('删除这个模型？')) return;
     api('/api/admin/models', {method:'DELETE', body:{group, subgroup:sub, index:Number(btn.dataset.index)}}).then(() => reload('模型已删除。')).catch(err => showMsg(err.message, true));

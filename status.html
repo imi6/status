@@ -56,7 +56,7 @@ h1::after{content:'';position:absolute;bottom:-8px;left:50%;transform:translateX
 .refresh-btn:disabled{background:#ccc;color:#888;cursor:not-allowed;box-shadow:2px 2px 0 0 #999}
 .section-title-right{display:flex;align-items:center;gap:10px}
 .lanes{border-top:3px solid #000}
-.lane{min-height:80px;display:grid;grid-template-columns:200px minmax(200px,1fr) 100px;gap:18px;align-items:center;border-bottom:3px solid #000;background:linear-gradient(90deg,rgba(50,240,140,.06),rgba(50,240,140,.02));padding:14px 0;animation:enter .34s ease both}
+.lane{min-height:80px;display:grid;grid-template-columns:240px minmax(200px,1fr) 100px;gap:18px;align-items:center;border-bottom:3px solid #000;background:linear-gradient(90deg,rgba(50,240,140,.06),rgba(50,240,140,.02));padding:14px 0;animation:enter .34s ease both}
 .lane-head{display:flex;align-items:center;gap:10px;min-width:0;padding-left:4px}
 .mark{width:12px;height:32px;background:#32f08c;box-shadow:3px 3px 0 0 rgba(50,240,140,.3)}
 .mark.degraded{background:#f1c40f;box-shadow:3px 3px 0 0 rgba(241,196,15,.3)}
@@ -242,7 +242,9 @@ function render(data){
   updateRefreshButtons();
 
   document.getElementById('overview').innerHTML=summary.top.map(g=>{
-    return'<div class="signal"><div class="signal-name">'+escapeHtml(g.sub_name||'')+'</div><div class="signal-meta"><span>'+(g.label||'采样中')+'</span><span>'+pct(scoreValue(g))+'</span></div></div>';
+    const modelName=g.name||g.sub_name||'';
+    const sub=g.sub_name&&g.sub_name!==modelName?g.sub_name+' · ':'';
+    return'<div class="signal"><div class="signal-name" title="'+escapeHtml(modelName)+'">'+escapeHtml(modelName)+'</div><div class="signal-meta"><span>'+escapeHtml(sub)+(g.label||'采样中')+'</span><span>'+pct(scoreValue(g))+'</span></div></div>';
   }).join('');
 
   if(!sections.length){document.getElementById('app').innerHTML='<div class="empty">暂无可展示分组</div>';return;}
@@ -257,8 +259,9 @@ function render(data){
     for(const g of rows){
       const status=g.status||'unknown';
       const latency=g.latency_ms?(g.latency_ms/1000).toFixed(2)+'s':'无延迟样本';
-      const displayName=g.sub_name||g.name||'';
-      output+='<div class="lane"><div class="lane-head"><span class="mark '+status+'"></span><div class="lane-name"><strong title="'+escapeHtml(displayName)+'">'+escapeHtml(displayName)+'</strong><span>'+(g.label||'采样中')+' · '+latency+'</span></div></div><div class="rail"><div class="track">'+segments(g.history)+'</div><div class="time-row"><span>历史</span><span>'+fmtTime(g.last_checked_at)+'</span></div></div><div class="score"><b>'+pct(scoreValue(g))+'</b><span>'+(g.label||'采样中')+'</span></div></div>';
+      const modelName=g.name||g.sub_name||'';
+      const sub=g.sub_name&&g.sub_name!==modelName?g.sub_name+' · ':'';
+      output+='<div class="lane"><div class="lane-head"><span class="mark '+status+'"></span><div class="lane-name"><strong title="'+escapeHtml(modelName)+'">'+escapeHtml(modelName)+'</strong><span>'+escapeHtml(sub)+(g.label||'采样中')+' · '+latency+'</span></div></div><div class="rail"><div class="track">'+segments(g.history)+'</div><div class="time-row"><span>历史</span><span>'+fmtTime(g.last_checked_at)+'</span></div></div><div class="score"><b>'+pct(scoreValue(g))+'</b><span>'+(g.label||'采样中')+'</span></div></div>';
     }
     output+='</div></section>';
   }

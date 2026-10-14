@@ -4,15 +4,18 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -684,6 +687,11 @@ func apiAdmin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		adminModels(w, r)
+	case "upstream-models":
+		if !requireAdmin(w, r) {
+			return
+		}
+		adminUpstreamModels(w, r)
 	default:
 		writeAdminJSON(w, 404, map[string]string{"error": "not found"})
 	}
@@ -937,4 +945,192 @@ func adminModels(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeAdminJSON(w, 405, map[string]string{"error": "method not allowed"})
 	}
+}
+
+func adminUpstreamModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeAdminJSON(w, 405, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var body struct {
+		Provider string `json:"provider"`
+		BaseURL  string `json:"baseURL"`
+		Key      string `json:"key"`
+		Group    string `json:"group"`
+		Subgroup string `json:"subgroup"`
+		Index    int    `json:"index"`
+	}
+	if !decodeBody(w, r, &body) {
+		return
+	}
+	key := strings.TrimSpace(body.Key)
+	if key == "" {
+		mu.RLock()
+		cur, err := modelAt(&cfg, body.Group, body.Subgroup, body.Index)
+		if err == nil {
+			key = cur.Key
+		}
+		mu.RUnlock()
+	}
+	if key == "" {
+		writeAdminJSON(w, 400, map[string]string{"error": "密钥不能为空"})
+		return
+	}
+	ids, err := listUpstreamModels(body.Provider, body.BaseURL, key)
+	if err != nil {
+		writeAdminJSON(w, 502, map[string]string{"error": err.Error()})
+		return
+	}
+	writeAdminJSON(w, 200, map[string]any{"models": ids})
+}
+
+func listUpstreamModels(provider, baseURL, key string) ([]string, error) {
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		provider = "openai-compat"
+	}
+	switch provider {
+	case "openai-compat", "openai-response", "google", "anthropic":
+	default:
+		return nil, errors.New("不支持的协议")
+	}
+	endpoint, err := upstreamModelsURL(baseURL)
+	if err != nil {
+		return nil, err
+	}
+	client := &http.Client{
+		Timeout: 20 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 3 {
+				return errors.New("重定向过多")
+			}
+			if req.URL.User != nil || (req.URL.Scheme != "http" && req.URL.Scheme != "https") || req.URL.Host == "" {
+				return errors.New("重定向地址无效")
+			}
+			return nil
+		},
+	}
+
+	seen := map[string]struct{}{}
+	var ids []string
+	pageURL := endpoint
+	for page := 0; page < 5 && len(ids) < 300; page++ {
+		req, err := http.NewRequest(http.MethodGet, pageURL, nil)
+		if err != nil {
+			return nil, errors.New("地址无效")
+		}
+		switch provider {
+		case "google":
+			q := req.URL.Query()
+			q.Set("key", key)
+			req.URL.RawQuery = q.Encode()
+		case "anthropic":
+			req.Header.Set("x-api-key", key)
+			req.Header.Set("anthropic-version", "2023-06-01")
+		default:
+			req.Header.Set("authorization", "Bearer "+key)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, errors.New("无法连接模型接口")
+		}
+		raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+		resp.Body.Close()
+		if readErr != nil {
+			return nil, errors.New("读取模型列表失败")
+		}
+		if resp.StatusCode >= 300 {
+			return nil, fmt.Errorf("模型接口返回 %d，请检查地址和密钥", resp.StatusCode)
+		}
+		batch, hasMore, lastID := parseUpstreamModelPage(provider, raw)
+		added := 0
+		for _, id := range batch {
+			if _, ok := seen[id]; ok || !acceptableModelID(id) {
+				continue
+			}
+			seen[id] = struct{}{}
+			ids = append(ids, id)
+			added++
+			if len(ids) >= 300 {
+				break
+			}
+		}
+		if !hasMore || lastID == "" || added == 0 || len(ids) >= 300 {
+			break
+		}
+		next, err := url.Parse(endpoint)
+		if err != nil {
+			break
+		}
+		q := next.Query()
+		q.Set("after_id", lastID)
+		next.RawQuery = q.Encode()
+		pageURL = next.String()
+	}
+	if len(ids) == 0 {
+		return nil, errors.New("接口没有返回可选模型")
+	}
+	sort.Strings(ids)
+	return ids, nil
+}
+
+func upstreamModelsURL(baseURL string) (string, error) {
+	raw := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	u, err := url.Parse(raw)
+	if err != nil || u.User != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return "", errors.New("地址需以 http:// 或 https:// 开头")
+	}
+	if len(raw) > 500 {
+		return "", errors.New("地址过长")
+	}
+	u.Path = strings.TrimRight(u.Path, "/") + "/models"
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String(), nil
+}
+
+func parseUpstreamModelPage(provider string, raw []byte) (ids []string, hasMore bool, lastID string) {
+	var page struct {
+		Data []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"data"`
+		Models []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"models"`
+		HasMore bool   `json:"has_more"`
+		LastID  string `json:"last_id"`
+	}
+	if json.Unmarshal(raw, &page) != nil {
+		return nil, false, ""
+	}
+	for _, item := range page.Data {
+		ids = append(ids, normalizeUpstreamModelID(provider, item.ID, item.Name))
+	}
+	for _, item := range page.Models {
+		ids = append(ids, normalizeUpstreamModelID(provider, item.ID, item.Name))
+	}
+	return ids, page.HasMore, strings.TrimSpace(page.LastID)
+}
+
+func normalizeUpstreamModelID(provider, id, name string) string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		id = strings.TrimSpace(name)
+	}
+	if provider == "google" {
+		id = strings.TrimPrefix(id, "models/")
+	}
+	return id
+}
+
+func acceptableModelID(id string) bool {
+	if id == "" || len([]rune(id)) > 120 {
+		return false
+	}
+	return !strings.ContainsAny(id, "\"|\r\n")
 }

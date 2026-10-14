@@ -196,6 +196,51 @@ func TestAdminRoundTripHidesSecrets(t *testing.T) {
 	}
 }
 
+func TestListUpstreamModels(t *testing.T) {
+	var gotKey string
+	openai := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer sk" {
+			http.Error(w, "no", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("content-type", "application/json")
+		io.WriteString(w, `{"data":[{"id":"gpt-4o"},{"id":"gpt-4o"},{"id":"bad\"id"},{"id":"GPT-PRO"}]}`)
+	}))
+	defer openai.Close()
+	ids, err := listUpstreamModels("openai-compat", openai.URL+"/v1/", "sk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(ids, ",") != "GPT-PRO,gpt-4o" {
+		t.Fatalf("ids = %#v", ids)
+	}
+
+	google := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotKey = r.URL.Query().Get("key")
+		if !strings.HasSuffix(r.URL.Path, "/models") {
+			http.NotFound(w, r)
+			return
+		}
+		io.WriteString(w, `{"models":[{"name":"models/gemini-2.0-flash"},{"name":"models/gemini-2.5-pro"}]}`)
+	}))
+	defer google.Close()
+	ids, err = listUpstreamModels("google", google.URL+"/v1beta", "g-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotKey != "g-key" || strings.Join(ids, ",") != "gemini-2.0-flash,gemini-2.5-pro" {
+		t.Fatalf("key=%q ids=%#v", gotKey, ids)
+	}
+
+	if _, err := listUpstreamModels("openai-compat", "ftp://example.com", "sk"); err == nil {
+		t.Fatal("expected invalid url")
+	}
+}
+
 func TestAdminPathReplacesDefaultRoute(t *testing.T) {
 	if _, err := cleanAdminPath("admin"); err == nil {
 		t.Fatal("expected common path to be rejected")

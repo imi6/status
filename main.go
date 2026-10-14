@@ -509,21 +509,24 @@ func cleanupOld() {
 	`)
 }
 
-// 四种协议的健康检查，均使用最小token输入输出
+// 四种协议的健康检查。请求只生成 1 个 token，必须从正文里读到模型写出的文字才算可用。
 func checkOpenAICompat(m Model) (bool, int) {
 	body := []byte(fmt.Sprintf(`{"model":"%s","messages":[{"role":"user","content":"h"}],"max_tokens":1}`, m.ID))
-	return doPost(m.BaseURL+"/chat/completions", m.Key, body, m.Timeout)
+	code, resp, lat := doPost(m.BaseURL+"/chat/completions", m.Key, body, m.Timeout)
+	return code > 0 && code < 300 && openaiCompatHasReply(resp), lat
 }
 
 func checkOpenAIResponse(m Model) (bool, int) {
 	body := []byte(fmt.Sprintf(`{"model":"%s","input":"h","max_tokens":1}`, m.ID))
-	return doPost(m.BaseURL+"/responses", m.Key, body, m.Timeout)
+	code, resp, lat := doPost(m.BaseURL+"/responses", m.Key, body, m.Timeout)
+	return code > 0 && code < 300 && openaiResponseHasReply(resp), lat
 }
 
 func checkGoogle(m Model) (bool, int) {
 	url := fmt.Sprintf("%s/models/%s:generateContent?key=%s", m.BaseURL, m.ID, m.Key)
 	body := []byte(`{"contents":[{"parts":[{"text":"h"}]}],"generationConfig":{"maxOutputTokens":1}}`)
-	return doPost(url, "", body, m.Timeout)
+	code, resp, lat := doPost(url, "", body, m.Timeout)
+	return code > 0 && code < 300 && googleHasReply(resp), lat
 }
 
 func checkAnthropic(m Model) (bool, int) {
@@ -535,13 +538,14 @@ func checkAnthropic(m Model) (bool, int) {
 	req.Header.Set("x-api-key", m.Key)
 	req.Header.Set("anthropic-version", "2023-06-01")
 	req.Header.Set("content-type", "application/json")
-	return doReq(req, m.Timeout)
+	code, resp, lat := doReq(req, m.Timeout)
+	return code > 0 && code < 300 && anthropicHasReply(resp), lat
 }
 
-func doPost(url, key string, body []byte, timeout int) (bool, int) {
+func doPost(url, key string, body []byte, timeout int) (int, []byte, int) {
 	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
 	if err != nil {
-		return false, 0
+		return 0, nil, 0
 	}
 	req.Header.Set("content-type", "application/json")
 	if key != "" {
@@ -550,7 +554,7 @@ func doPost(url, key string, body []byte, timeout int) (bool, int) {
 	return doReq(req, timeout)
 }
 
-func doReq(req *http.Request, timeout int) (bool, int) {
+func doReq(req *http.Request, timeout int) (int, []byte, int) {
 	if timeout == 0 {
 		timeout = 30
 	}
@@ -564,11 +568,138 @@ func doReq(req *http.Request, timeout int) (bool, int) {
 	resp, err := client.Do(req)
 	lat := int(time.Since(start).Milliseconds())
 	if err != nil {
-		return false, lat
+		return 0, nil, lat
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
-	return resp.StatusCode < 300, lat
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return 0, nil, lat
+	}
+	return resp.StatusCode, b, lat
+}
+
+func hasAPIError(raw json.RawMessage) bool {
+	if len(raw) == 0 || string(raw) == "null" {
+		return false
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return strings.TrimSpace(s) != ""
+	}
+	return true
+}
+
+func textFromContent(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return strings.TrimSpace(s)
+	}
+	var parts []struct {
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &parts) == nil {
+		var b strings.Builder
+		for _, p := range parts {
+			b.WriteString(p.Text)
+		}
+		return strings.TrimSpace(b.String())
+	}
+	return ""
+}
+
+func openaiCompatHasReply(raw []byte) bool {
+	var v struct {
+		Error   json.RawMessage `json:"error"`
+		Choices []struct {
+			Text    string          `json:"text"`
+			Message struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+			Delta struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"delta"`
+		} `json:"choices"`
+	}
+	if json.Unmarshal(raw, &v) != nil || hasAPIError(v.Error) {
+		return false
+	}
+	for _, c := range v.Choices {
+		if strings.TrimSpace(c.Text) != "" || textFromContent(c.Message.Content) != "" || textFromContent(c.Delta.Content) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func openaiResponseHasReply(raw []byte) bool {
+	var v struct {
+		Error      json.RawMessage `json:"error"`
+		OutputText string          `json:"output_text"`
+		Output     []struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
+	}
+	if json.Unmarshal(raw, &v) != nil || hasAPIError(v.Error) {
+		return false
+	}
+	if strings.TrimSpace(v.OutputText) != "" {
+		return true
+	}
+	for _, item := range v.Output {
+		for _, part := range item.Content {
+			if strings.TrimSpace(part.Text) != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func googleHasReply(raw []byte) bool {
+	var v struct {
+		Error      json.RawMessage `json:"error"`
+		Candidates []struct {
+			Content struct {
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"content"`
+		} `json:"candidates"`
+	}
+	if json.Unmarshal(raw, &v) != nil || hasAPIError(v.Error) {
+		return false
+	}
+	for _, c := range v.Candidates {
+		for _, p := range c.Content.Parts {
+			if strings.TrimSpace(p.Text) != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func anthropicHasReply(raw []byte) bool {
+	var v struct {
+		Error   json.RawMessage `json:"error"`
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if json.Unmarshal(raw, &v) != nil || hasAPIError(v.Error) {
+		return false
+	}
+	for _, part := range v.Content {
+		if strings.TrimSpace(part.Text) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func checkOne(m Model) (bool, int) {

@@ -7,8 +7,12 @@ if [ ! -f /data/config.json ]; then
 fi
 
 cd /data
-rm -f /data/status.html /data/admin.html
-ln -s /opt/status/status.html /data/status.html
-ln -s /opt/status/admin.html /data/admin.html
+# 页面在镜像内的 /opt/status，不写到挂载目录。顺手清掉旧版本留下的符号链接。
+if [ -L /data/status.html ]; then
+    rm -f /data/status.html
+fi
+if [ -L /data/admin.html ]; then
+    rm -f /data/admin.html
+fi
 
 exec /usr/local/bin/status
