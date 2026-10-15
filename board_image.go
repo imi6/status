@@ -21,8 +21,6 @@ import (
 	"golang.org/x/image/math/fixed"
 )
 
-const boardPageSize = 10
-
 type boardCard struct {
 	name, ratio, status, rate string
 	dots                      []int
@@ -42,15 +40,11 @@ func renderStatusBoard(title string, sections []Section, now time.Time) ([][]byt
 		title = "分组状态"
 	}
 	cards := buildBoardCards(sections)
-	pages := chunkBoardCards(cards, boardPageSize)
-	var out [][]byte
-	for i, page := range pages {
-		pngBytes, err := drawBoardPage(titleFace, nameFace, metaFace, title, page, now, i+1, len(pages), len(cards))
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, pngBytes)
+	pngBytes, err := drawBoardPage(titleFace, nameFace, metaFace, title, cards, now, boardColumns(len(cards)))
+	if err != nil {
+		return nil, err
 	}
+	out := [][]byte{pngBytes}
 	return out, nil
 }
 
@@ -143,40 +137,48 @@ func dotLevel(b TimelineBucket) int {
 	return 0
 }
 
-func chunkBoardCards(cards []boardCard, n int) [][]boardCard {
-	if n < 1 {
-		n = boardPageSize
-	}
-	if len(cards) == 0 {
-		return [][]boardCard{{}}
-	}
-	var out [][]boardCard
-	for i := 0; i < len(cards); i += n {
-		j := i + n
-		if j > len(cards) {
-			j = len(cards)
-		}
-		out = append(out, cards[i:j])
-	}
-	return out
-}
+const (
+	boardMargin = 28
+	boardGap    = 16
+	boardCardW  = 524
+	boardCardH  = 148
+	boardHeadH  = 108
+	boardBottom = 28
+)
 
-func drawBoardPage(titleFace, nameFace, metaFace font.Face, title string, cards []boardCard, now time.Time, page, pages, total int) ([]byte, error) {
-	const (
-		width  = 1120
-		margin = 28
-		gap    = 16
-		cardH  = 148
-		headH  = 108
-		bottom = 28
-		radius = 18
-		cols   = 2
-	)
-	rows := (len(cards) + cols - 1) / cols
+func boardSize(n, cols int) (int, int) {
+	rows := (n + cols - 1) / cols
 	if rows < 1 {
 		rows = 1
 	}
-	height := headH + rows*cardH + (rows-1)*gap + bottom
+	width := boardMargin*2 + cols*boardCardW + (cols-1)*boardGap
+	height := boardHeadH + rows*boardCardH + (rows-1)*boardGap + boardBottom
+	return width, height
+}
+
+// boardColumns 分组多时加列，让整张图不会太长，Telegram 压缩后仍能看清。
+func boardColumns(n int) int {
+	for cols := 2; cols < 6; cols++ {
+		w, h := boardSize(n, cols)
+		if float64(h) <= float64(w)*1.4 {
+			return cols
+		}
+	}
+	return 6
+}
+
+func drawBoardPage(titleFace, nameFace, metaFace font.Face, title string, cards []boardCard, now time.Time, cols int) ([]byte, error) {
+	const (
+		margin = boardMargin
+		gap    = boardGap
+		cardH  = boardCardH
+		headH  = boardHeadH
+		radius = 18
+	)
+	if cols < 1 {
+		cols = 2
+	}
+	width, height := boardSize(len(cards), cols)
 	img := image.NewRGBA(image.Rect(0, 0, width, height))
 	bg := color.RGBA{243, 246, 251, 255}
 	draw.Draw(img, img.Bounds(), image.NewUniform(bg), image.Point{}, draw.Src)
@@ -187,16 +189,10 @@ func drawBoardPage(titleFace, nameFace, metaFace font.Face, title string, cards 
 	drawString(img, titleFace, margin, titleBaseline, fitText(titleFace, title, width-240), ink)
 	clock := now.Format("01/02 15:04")
 	drawString(img, metaFace, width-margin-textWidth(metaFace, clock), titleBaseline-4, clock, muted)
-	sub := "0 个分组"
-	if total > 0 {
-		sub = strconv.Itoa(total) + " 个分组"
-	}
-	if pages > 1 {
-		sub += " · " + strconv.Itoa(page) + "/" + strconv.Itoa(pages)
-	}
+	sub := strconv.Itoa(len(cards)) + " 个分组"
 	drawString(img, metaFace, margin, titleBaseline+12+metaFace.Metrics().Ascent.Ceil(), sub, muted)
 
-	cardW := (width - margin*2 - gap) / cols
+	cardW := boardCardW
 	for i, card := range cards {
 		col := i % cols
 		row := i / cols

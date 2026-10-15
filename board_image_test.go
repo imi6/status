@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -16,14 +17,14 @@ import (
 	"golang.org/x/image/font/opentype"
 )
 
-func TestChunkBoardCards(t *testing.T) {
-	if pages := chunkBoardCards(nil, 10); len(pages) != 1 || len(pages[0]) != 0 {
-		t.Fatalf("empty %#v", pages)
+func TestBoardColumns(t *testing.T) {
+	if boardColumns(8) != 2 {
+		t.Fatalf("8 cards -> %d", boardColumns(8))
 	}
-	cards := make([]boardCard, 11)
-	pages := chunkBoardCards(cards, 10)
-	if len(pages) != 2 || len(pages[0]) != 10 || len(pages[1]) != 1 {
-		t.Fatalf("pages %d %d", len(pages), len(pages[0]))
+	cols := boardColumns(40)
+	w, h := boardSize(40, cols)
+	if cols < 3 || float64(h) > float64(w)*1.4 || w+h > 10000 {
+		t.Fatalf("40 cards -> %d cols %dx%d", cols, w, h)
 	}
 	if ratioTag("0.08") != "0.08x" || ratioTag("1.5倍") != "1.5倍" || ratioTag("  ") != "" {
 		t.Fatal(ratioTag("0.08"))
@@ -49,6 +50,14 @@ func TestRenderStatusBoard(t *testing.T) {
 	}
 	if len(pngs) != 1 {
 		t.Fatalf("pages %d", len(pngs))
+	}
+	var many []GroupResp
+	for i := 0; i < 36; i++ {
+		many = append(many, GroupResp{Name: "m", SubName: "子组 " + strconv.Itoa(i), Status: "up"})
+	}
+	bigs, err := renderStatusBoard("监控", []Section{{Name: "G", Rows: many}}, now)
+	if err != nil || len(bigs) != 1 {
+		t.Fatalf("36 cards -> %d images %v", len(bigs), err)
 	}
 	cfg, err := png.DecodeConfig(bytes.NewReader(pngs[0]))
 	if err != nil {
