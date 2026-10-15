@@ -172,9 +172,10 @@ button.drag:active{cursor:grabbing}
           <label>Kuma Slug<input name="kumaSlug" spellcheck="false"></label>
           <label class="wide">Telegram Bot Token<input name="tgToken" type="password" autocomplete="new-password" spellcheck="false" placeholder="123456:ABC..."></label>
           <label>Telegram 群组 ID<input name="tgChat" spellcheck="false" placeholder="-1001234567890"></label>
+          <label>群推送间隔（分钟）<input name="tgInterval" type="number" min="0" max="10080" value="0"></label>
           <label class="wide">页脚 HTML<textarea name="footer"></textarea></label>
         </div>
-        <p class="hint">后台路径就是地址里的目录名，不要用 admin 这种常见词。修改路径或端口后需要重启进程。状态页不会显示这个入口。默认接口地址会填进新建模型，留空则使用 https://zzshu.cc。把机器人拉进目标群后填写 Token 和群组 ID，只在分组状态变化时推送，不会每次探测都发。</p>
+        <p class="hint">后台路径就是地址里的目录名，不要用 admin 这种常见词。修改路径或端口后需要重启进程。状态页不会显示这个入口。默认接口地址会填进新建模型，留空则使用 https://zzshu.cc。把机器人拉进目标群后填写 Token 和群组 ID。推送间隔填 0 时，分组状态一变化就发到群里。填 30 则最多每 30 分钟把这段时间的变化合成一条，没有变化不发。实际发送不会快过检测间隔。</p>
         <div class="row-actions"><button type="submit">保存站点设置</button><button type="button" class="ghost" id="tgTest">发送测试</button></div>
       </form>
     </section>
@@ -333,6 +334,7 @@ function fillSettings(){
   const tg = state.telegram || {};
   f.tgToken.value = tg.botToken || '';
   f.tgChat.value = tg.chatID || '';
+  f.tgInterval.value = tg.interval || 0;
 }
 let _modelGroup = '';
 function render(){
@@ -415,7 +417,7 @@ $('settingsForm').addEventListener('submit', async (e) => {
       frontend: {title:f.title.value, subtitle:f.subtitle.value, icon:f.icon.value, footer:f.footer.value},
       defaultBaseURL: f.defaultBaseURL.value,
       kuma: {baseURL:f.kumaBase.value, slug:f.kumaSlug.value},
-      telegram: {botToken:f.tgToken.value, chatID:f.tgChat.value}
+      telegram: {botToken:f.tgToken.value, chatID:f.tgChat.value, interval:Number(f.tgInterval.value || 0)}
     }});
     await reload('站点设置已保存。');
   } catch (err) { showMsg(err.message, true); }
@@ -424,7 +426,7 @@ $('tgTest').addEventListener('click', async () => {
   const f = $('settingsForm');
   try {
     await api('/api/admin/telegram-test', {method:'POST', body:{botToken:f.tgToken.value, chatID:f.tgChat.value}});
-    showMsg('测试消息已发到群里。保存设置后才会在状态变化时自动推送。', false);
+    showMsg('测试消息已发到群里。保存设置后，才会按推送间隔自动发到群里。', false);
   } catch (err) { showMsg(err.message, true); }
 });
 $('passwordForm').addEventListener('submit', async (e) => {

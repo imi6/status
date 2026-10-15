@@ -330,11 +330,32 @@ func TestTelegramDigestAndSend(t *testing.T) {
 	if strings.Contains(text, "terra") {
 		t.Fatal("unchanged model should be omitted")
 	}
-	if _, err := cleanTelegram(TelegramConfig{BotToken: "123:abc", ChatID: "-1001"}); err != nil {
+	if _, err := cleanTelegram(TelegramConfig{BotToken: "123:abc", ChatID: "-1001", Interval: 30}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := cleanTelegram(TelegramConfig{BotToken: "123:abc"}); err == nil {
 		t.Fatal("missing chat")
+	}
+	if _, err := cleanTelegram(TelegramConfig{Interval: 10081}); err == nil {
+		t.Fatal("expected interval error")
+	}
+	resetTelegramQueue()
+	t.Cleanup(resetTelegramQueue)
+	now := time.Now()
+	markTelegramPushed(now)
+	held := []Section{{Name: "Claude", Rows: []GroupResp{{Name: "haiku", SubName: "Claude Max", Status: "down"}}}}
+	prevHeld := map[string]string{"Claude\x1fClaude Max\x1fhaiku": "up"}
+	if text := takeTelegram(prevHeld, "up", held, "down", "部分异常", 30*time.Minute, now.Add(10*time.Minute)); text != "" {
+		t.Fatalf("should wait for interval, got %q", text)
+	}
+	merged := takeTelegram(prevHeld, "down", held, "down", "部分异常", 30*time.Minute, now.Add(30*time.Minute))
+	if !strings.Contains(merged, "正常 → 异常") || !strings.Contains(merged, "整体：运行正常 → 部分异常") {
+		t.Fatalf("merged digest:\n%s", merged)
+	}
+	back := []Section{{Name: "Claude", Rows: []GroupResp{{Name: "haiku", SubName: "Claude Max", Status: "up"}}}}
+	takeTelegram(map[string]string{"Claude\x1fClaude Max\x1fhaiku": "down"}, "down", back, "up", "运行正常", 30*time.Minute, now.Add(31*time.Minute))
+	if text := takeTelegram(map[string]string{"Claude\x1fClaude Max\x1fhaiku": "up"}, "up", held, "down", "部分异常", 30*time.Minute, now.Add(40*time.Minute)); text != "" {
+		t.Fatalf("reverted change should stay quiet, got %q", text)
 	}
 
 	var gotChat, gotText string
@@ -420,6 +441,24 @@ func TestReorderSubGroups(t *testing.T) {
 	mu.Unlock()
 	if rows[0].SubName != "B" || rows[1].Name != "m1" || rows[2].Name != "m3" {
 		t.Fatalf("%+v", rows)
+	}
+}
+
+func TestLiveRatioShowsWithoutProbe(t *testing.T) {
+	mu.Lock()
+	oldStatus := statusV2
+	oldCfg := cfg
+	statusV2 = StatusRespV2{Sections: []Section{{Name: "GPT", Rows: []GroupResp{
+		{Name: "m", SubName: "GPT 特惠", Status: "up"},
+	}}}}
+	cfg = Config{Groups: []Group{{Name: "GPT", SubGroups: []SubGroup{{Name: "GPT 特惠", Ratio: "0.09"}}}}}
+	applyLiveRatios(statusV2.Sections)
+	got := statusV2.Sections[0].Rows[0].Ratio
+	statusV2 = oldStatus
+	cfg = oldCfg
+	mu.Unlock()
+	if got != "0.09" {
+		t.Fatalf("ratio %q", got)
 	}
 }
 

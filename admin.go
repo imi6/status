@@ -494,6 +494,9 @@ func serveAdminPage(w http.ResponseWriter, r *http.Request) {
 func cleanTelegram(t TelegramConfig) (TelegramConfig, error) {
 	t.BotToken = strings.TrimSpace(t.BotToken)
 	t.ChatID = strings.TrimSpace(t.ChatID)
+	if t.Interval < 0 || t.Interval > 10080 {
+		return t, errors.New("推送间隔需在 0 到 10080 分钟")
+	}
 	if t.BotToken == "" && t.ChatID == "" {
 		return t, nil
 	}
@@ -994,7 +997,7 @@ func adminTelegramTest(w http.ResponseWriter, r *http.Request) {
 		writeAdminJSON(w, 400, map[string]string{"error": "请先填写 Bot Token 和群组 ID"})
 		return
 	}
-	if err := sendTelegram(cleaned.BotToken, cleaned.ChatID, "监控已连接到这个群。之后只在分组状态变化时推送。"); err != nil {
+	if err := sendTelegram(cleaned.BotToken, cleaned.ChatID, "监控已连接到这个群。之后按设置的间隔，在分组状态变化时推送。"); err != nil {
 		writeAdminJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
@@ -1104,6 +1107,9 @@ func adminSubGroups(w http.ResponseWriter, r *http.Request) {
 			}
 			return addSubGroup(c, body.Group, body.Name, body.KumaSlug, body.Ratio)
 		})
+		if err == nil {
+			syncLiveRatios()
+		}
 		finishChange(w, err, true)
 	case http.MethodPut:
 		newName := body.NewName
@@ -1115,6 +1121,8 @@ func adminSubGroups(w http.ResponseWriter, r *http.Request) {
 		})
 		if err == nil {
 			renameSubHistory(strings.TrimSpace(body.Group), strings.TrimSpace(body.Name), strings.TrimSpace(newName))
+			renameLiveSubgroup(strings.TrimSpace(body.Group), strings.TrimSpace(body.Name), strings.TrimSpace(newName))
+			syncLiveRatios()
 		}
 		finishChange(w, err, true)
 	case http.MethodPatch:

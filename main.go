@@ -46,6 +46,7 @@ type Config struct {
 type TelegramConfig struct {
 	BotToken string `json:"botToken"`
 	ChatID   string `json:"chatID"`
+	Interval int    `json:"interval"` // 群推送间隔（分钟）。0 表示状态一变化就推送
 }
 
 type KumaConfig struct {
@@ -1089,6 +1090,7 @@ func updateRow(gName string, sg SubGroup, m Model, sections *[]Section, up bool,
 	mu.Lock()
 	*sections = upsertSectionRow(*sections, gName, row)
 	*sections = applyConfigOrder(*sections, cfg.Groups)
+	applyLiveRatios(*sections)
 
 	overallStatus, overallLabel := overallFromRows(*sections)
 
@@ -1168,6 +1170,50 @@ func applyConfigOrder(sections []Section, groups []Group) []Section {
 		sections[i].Rows = rows
 	}
 	return sections
+}
+
+// applyLiveRatios 把后台刚保存的倍率写进已经展示的卡片，不必等下一轮探测。
+func applyLiveRatios(sections []Section) {
+	ratios := make(map[string]string)
+	for _, g := range cfg.Groups {
+		for _, sg := range g.SubGroups {
+			ratios[g.Name+"\x1f"+sg.Name] = strings.TrimSpace(sg.Ratio)
+		}
+	}
+	for i := range sections {
+		for j := range sections[i].Rows {
+			key := sections[i].Name + "\x1f" + sections[i].Rows[j].SubName
+			if ratio, ok := ratios[key]; ok {
+				sections[i].Rows[j].Ratio = ratio
+			}
+		}
+	}
+}
+
+func syncLiveRatios() {
+	mu.Lock()
+	applyLiveRatios(statusV2.Sections)
+	mu.Unlock()
+}
+
+func renameLiveSubgroup(group, oldName, newName string) {
+	oldName = strings.TrimSpace(oldName)
+	newName = strings.TrimSpace(newName)
+	if oldName == "" || oldName == newName {
+		return
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for i := range statusV2.Sections {
+		if statusV2.Sections[i].Name != group {
+			continue
+		}
+		for j := range statusV2.Sections[i].Rows {
+			if statusV2.Sections[i].Rows[j].SubName == oldName {
+				statusV2.Sections[i].Rows[j].SubName = newName
+			}
+		}
+	}
 }
 
 func reorderSections(names []string) {
@@ -1281,6 +1327,7 @@ func refresh() {
 	sections = pruneStaleSections(sections, cfg)
 	mu.Lock()
 	sections = applyConfigOrder(sections, cfg.Groups)
+	applyLiveRatios(sections)
 	statusV2.Sections = sections
 	mu.Unlock()
 
@@ -1330,6 +1377,7 @@ func refresh() {
 	// 全部检测完毕，标记 checking = false
 	mu.Lock()
 	sections = applyConfigOrder(sections, cfg.Groups)
+	applyLiveRatios(sections)
 	overallStatus, overallLabel := overallFromRows(sections)
 	statusV2 = StatusRespV2{
 		Title:           cfg.Frontend.Title,
@@ -1392,11 +1440,13 @@ func refresh() {
 
 	mu.RLock()
 	tgToken, tgChat := cfg.Telegram.BotToken, cfg.Telegram.ChatID
+	tgEvery := time.Duration(cfg.Telegram.Interval) * time.Minute
 	mu.RUnlock()
 	// 启动时已经用历史记录填过状态，第一轮探测只当基线，不推送。
 	if !telegramBaselined {
 		telegramBaselined = true
-	} else if text := telegramDigest(prevRows, prevOverall, sections, overallStatus, overallLabel); text != "" {
+		markTelegramPushed(time.Now())
+	} else if text := takeTelegram(prevRows, prevOverall, sections, overallStatus, overallLabel, tgEvery, time.Now()); text != "" {
 		if err := sendTelegram(tgToken, tgChat, text); err != nil {
 			log.Println("telegram:", err)
 		}
@@ -1431,23 +1481,49 @@ func overallWord(status string) string {
 	}
 }
 
+type tgItem struct {
+	group, sub, model, from, to string
+}
+
+type telegramQueue struct {
+	sync.Mutex
+	items                         map[string]tgItem
+	overallFrom, overallTo, label string
+	last                          time.Time
+}
+
+var tgQueue telegramQueue
+
 func telegramDigest(prev map[string]string, prevOverall string, sections []Section, overall, overallLabel string) string {
+	items, of, ot, ol := collectTelegram(prev, prevOverall, sections, overall, overallLabel)
+	return formatTelegram(items, of, ot, ol)
+}
+
+func collectTelegram(prev map[string]string, prevOverall string, sections []Section, overall, overallLabel string) ([]tgItem, string, string, string) {
 	if prevOverall == "" && len(prev) == 0 {
-		return ""
+		return nil, "", "", ""
 	}
-	type item struct {
-		group, sub, model, from, to string
-	}
-	var items []item
+	var items []tgItem
 	for _, sec := range sections {
 		for _, r := range sec.Rows {
 			old, ok := prev[sec.Name+"\x1f"+r.SubName+"\x1f"+r.Name]
 			if !ok || old == "" || old == r.Status {
 				continue
 			}
-			items = append(items, item{sec.Name, r.SubName, r.Name, old, r.Status})
+			items = append(items, tgItem{sec.Name, r.SubName, r.Name, old, r.Status})
 		}
 	}
+	if prevOverall == "" || overall == "" || prevOverall == overall {
+		return items, "", "", ""
+	}
+	label := overallLabel
+	if label == "" {
+		label = overallWord(overall)
+	}
+	return items, prevOverall, overall, label
+}
+
+func formatTelegram(items []tgItem, overallFrom, overallTo, overallLabel string) string {
 	sort.Slice(items, func(i, j int) bool {
 		if items[i].group != items[j].group {
 			return items[i].group < items[j].group
@@ -1472,17 +1548,77 @@ func telegramDigest(prev map[string]string, prevOverall string, sections []Secti
 			fmt.Fprintf(&b, "\n\n还有 %d 项变化", extra)
 		}
 	}
-	if prevOverall != "" && overall != "" && prevOverall != overall {
+	if overallFrom != "" && overallTo != "" && overallFrom != overallTo {
 		if b.Len() > 0 {
 			b.WriteString("\n\n")
 		}
 		label := overallLabel
 		if label == "" {
-			label = overallWord(overall)
+			label = overallWord(overallTo)
 		}
-		fmt.Fprintf(&b, "整体：%s → %s", overallWord(prevOverall), label)
+		fmt.Fprintf(&b, "整体：%s → %s", overallWord(overallFrom), label)
 	}
 	return b.String()
+}
+
+func markTelegramPushed(now time.Time) {
+	tgQueue.Lock()
+	tgQueue.last = now
+	tgQueue.Unlock()
+}
+
+func resetTelegramQueue() {
+	tgQueue.Lock()
+	tgQueue.items = map[string]tgItem{}
+	tgQueue.overallFrom, tgQueue.overallTo, tgQueue.label = "", "", ""
+	tgQueue.last = time.Time{}
+	tgQueue.Unlock()
+}
+
+// takeTelegram 把本轮变化并进待发送队列。间隔为 0 时立刻返回消息；否则等到间隔结束再汇总。
+func takeTelegram(prev map[string]string, prevOverall string, sections []Section, overall, overallLabel string, every time.Duration, now time.Time) string {
+	items, of, ot, ol := collectTelegram(prev, prevOverall, sections, overall, overallLabel)
+	tgQueue.Lock()
+	defer tgQueue.Unlock()
+	if tgQueue.items == nil {
+		tgQueue.items = map[string]tgItem{}
+	}
+	for _, it := range items {
+		key := it.group + "\x1f" + it.sub + "\x1f" + it.model
+		if prevItem, ok := tgQueue.items[key]; ok {
+			it.from = prevItem.from
+		}
+		if it.from == it.to {
+			delete(tgQueue.items, key)
+			continue
+		}
+		tgQueue.items[key] = it
+	}
+	if of != "" && ot != "" && of != ot {
+		if tgQueue.overallFrom == "" {
+			tgQueue.overallFrom = of
+		}
+		tgQueue.overallTo = ot
+		tgQueue.label = ol
+		if tgQueue.overallFrom == tgQueue.overallTo {
+			tgQueue.overallFrom, tgQueue.overallTo, tgQueue.label = "", "", ""
+		}
+	}
+	if len(tgQueue.items) == 0 && tgQueue.overallFrom == "" {
+		return ""
+	}
+	if every > 0 && !tgQueue.last.IsZero() && now.Sub(tgQueue.last) < every {
+		return ""
+	}
+	pending := make([]tgItem, 0, len(tgQueue.items))
+	for _, it := range tgQueue.items {
+		pending = append(pending, it)
+	}
+	text := formatTelegram(pending, tgQueue.overallFrom, tgQueue.overallTo, tgQueue.label)
+	tgQueue.items = map[string]tgItem{}
+	tgQueue.overallFrom, tgQueue.overallTo, tgQueue.label = "", "", ""
+	tgQueue.last = now
+	return text
 }
 
 var (
