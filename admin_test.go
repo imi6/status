@@ -314,6 +314,34 @@ func TestAdminPathReplacesDefaultRoute(t *testing.T) {
 	}
 }
 
+func TestStatusBoardMessage(t *testing.T) {
+	now := time.Date(2026, 10, 15, 14, 40, 0, 0, time.Local)
+	hour := make([]TimelineBucket, 24)
+	hour[22] = TimelineBucket{Samples: 10, Up: 8, Rate: 80}
+	hour[23] = TimelineBucket{Samples: 10, Up: 10, Rate: 100}
+	sections := []Section{{Name: "GPT", Rows: []GroupResp{
+		{Name: "plus", SubName: "GPT Plus", Status: "up", Ratio: "0.09", Timelines: map[string][]TimelineBucket{"hour": hour}},
+		{Name: "pro", SubName: "GPT Pro", Status: "degraded", Timelines: map[string][]TimelineBucket{"hour": {{Samples: 5, Up: 2, Rate: 40}}}},
+	}}}
+	text := formatStatusBoard("吱吱鼠AI监控", sections, now, "zzshu.si", "@zzshu")
+	if !strings.Contains(text, "吱吱鼠AI监控") || !strings.Contains(text, "分组状态 | 14:40") {
+		t.Fatalf("header:\n%s", text)
+	}
+	if !strings.Contains(text, "正常 100.00% | GPT Plus ×0.09") || !strings.Contains(text, "🟩") || !strings.Contains(text, "🟨") {
+		t.Fatalf("plus:\n%s", text)
+	}
+	if !strings.Contains(text, "降级 40.00% | GPT Pro") || !strings.Contains(text, "🟥") || strings.Contains(text, "GPT Pro ×") {
+		t.Fatalf("pro:\n%s", text)
+	}
+	if !strings.HasSuffix(text, "官网：zzshu.si 通知频道：@zzshu") {
+		t.Fatalf("footer:\n%s", text)
+	}
+	plain := formatStatusBoard("吱吱鼠AI监控", sections, now, "", "")
+	if strings.Contains(plain, "官网") || strings.Contains(plain, "通知频道") {
+		t.Fatalf("empty footer:\n%s", plain)
+	}
+}
+
 func TestTelegramDigestAndSend(t *testing.T) {
 	if telegramDigest(nil, "", nil, "up", "运行正常") != "" {
 		t.Fatal("first snapshot should stay quiet")
@@ -330,8 +358,15 @@ func TestTelegramDigestAndSend(t *testing.T) {
 	if strings.Contains(text, "terra") {
 		t.Fatal("unchanged model should be omitted")
 	}
-	if _, err := cleanTelegram(TelegramConfig{BotToken: "123:abc", ChatID: "-1001", Interval: 30}); err != nil {
+	got, err := cleanTelegram(TelegramConfig{BotToken: "123:abc", ChatID: "-1001\n@zzzzz,-1001", Interval: 30})
+	if err != nil {
 		t.Fatal(err)
+	}
+	if len(got.ChatIDs) != 2 || got.ChatIDs[0] != "-1001" || got.ChatIDs[1] != "@zzzzz" {
+		t.Fatalf("chats %#v", got.ChatIDs)
+	}
+	if _, err := cleanTelegram(TelegramConfig{BotToken: "123:abc", ChatIDs: []string{"-1001", "bad"}}); err == nil {
+		t.Fatal("expected invalid chat")
 	}
 	if _, err := cleanTelegram(TelegramConfig{BotToken: "123:abc"}); err == nil {
 		t.Fatal("missing chat")

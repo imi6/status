@@ -491,23 +491,72 @@ func serveAdminPage(w http.ResponseWriter, r *http.Request) {
 	serveAsset(w, r, "admin.html")
 }
 
+func cleanBoardNote(v, what string) (string, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "", nil
+	}
+	if len([]rune(v)) > 120 || strings.ContainsAny(v, " \r\n<>") {
+		return "", errors.New(what + "不能包含空格、换行或尖括号")
+	}
+	return v, nil
+}
+
+func splitChatIDs(parts ...string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, part := range parts {
+		for _, piece := range strings.FieldsFunc(part, func(r rune) bool {
+			return r == '\n' || r == '\r' || r == ',' || r == '，' || r == ';' || r == '；' || r == ' ' || r == '\t'
+		}) {
+			piece = strings.TrimSpace(piece)
+			if piece == "" || seen[piece] {
+				continue
+			}
+			seen[piece] = true
+			out = append(out, piece)
+		}
+	}
+	return out
+}
+
 func cleanTelegram(t TelegramConfig) (TelegramConfig, error) {
 	t.BotToken = strings.TrimSpace(t.BotToken)
 	t.ChatID = strings.TrimSpace(t.ChatID)
+	t.ChatIDs = splitChatIDs(append([]string{t.ChatID}, t.ChatIDs...)...)
+	if len(t.ChatIDs) > 0 {
+		t.ChatID = t.ChatIDs[0]
+	} else {
+		t.ChatID = ""
+	}
+	var err error
+	t.Website, err = cleanBoardNote(t.Website, "官网")
+	if err != nil {
+		return t, err
+	}
+	t.Channel, err = cleanBoardNote(t.Channel, "通知频道")
+	if err != nil {
+		return t, err
+	}
 	if t.Interval < 0 || t.Interval > 10080 {
 		return t, errors.New("推送间隔需在 0 到 10080 分钟")
 	}
-	if t.BotToken == "" && t.ChatID == "" {
+	if t.BotToken == "" && len(t.ChatIDs) == 0 {
 		return t, nil
 	}
-	if t.BotToken == "" || t.ChatID == "" {
+	if t.BotToken == "" || len(t.ChatIDs) == 0 {
 		return t, errors.New("Telegram 需要同时填写 Bot Token 和群组 ID")
+	}
+	if len(t.ChatIDs) > 20 {
+		return t, errors.New("最多填写 20 个群组")
 	}
 	if len(t.BotToken) > 200 || strings.ContainsAny(t.BotToken, " \r\n") || !strings.Contains(t.BotToken, ":") {
 		return t, errors.New("Bot Token 格式不正确")
 	}
-	if !validTelegramChat(t.ChatID) {
-		return t, errors.New("群组 ID 需为数字，或以 @ 开头的频道用户名")
+	for _, id := range t.ChatIDs {
+		if !validTelegramChat(id) {
+			return t, errors.New("群组 ID 需为数字，或以 @ 开头的频道用户名")
+		}
 	}
 	return t, nil
 }
@@ -997,7 +1046,7 @@ func adminTelegramTest(w http.ResponseWriter, r *http.Request) {
 		writeAdminJSON(w, 400, map[string]string{"error": "请先填写 Bot Token 和群组 ID"})
 		return
 	}
-	if err := sendTelegram(cleaned.BotToken, cleaned.ChatID, "监控已连接到这个群。之后按设置的间隔，在分组状态变化时推送。"); err != nil {
+	if err := sendTelegramAll(cleaned.BotToken, cleaned.ChatIDs, []string{"监控已连接到这个群。之后按设置的间隔，在分组状态变化时推送。"}); err != nil {
 		writeAdminJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}

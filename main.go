@@ -44,9 +44,12 @@ type Config struct {
 }
 
 type TelegramConfig struct {
-	BotToken string `json:"botToken"`
-	ChatID   string `json:"chatID"`
-	Interval int    `json:"interval"` // 群推送间隔（分钟）。0 表示状态一变化就推送
+	BotToken string   `json:"botToken"`
+	ChatID   string   `json:"chatID"`
+	ChatIDs  []string `json:"chatIDs,omitempty"`
+	Interval int      `json:"interval"` // 群推送间隔（分钟）。0 表示状态一变化就推送
+	Website  string   `json:"website"`  // 推送消息底部的官网，留空不显示
+	Channel  string   `json:"channel"`  // 推送消息底部的通知频道，留空不显示
 }
 
 type KumaConfig struct {
@@ -190,6 +193,12 @@ func normalizeConfig(c *Config) {
 	}
 	c.Telegram.BotToken = strings.TrimSpace(c.Telegram.BotToken)
 	c.Telegram.ChatID = strings.TrimSpace(c.Telegram.ChatID)
+	c.Telegram.ChatIDs = splitChatIDs(append([]string{c.Telegram.ChatID}, c.Telegram.ChatIDs...)...)
+	if len(c.Telegram.ChatIDs) > 0 {
+		c.Telegram.ChatID = c.Telegram.ChatIDs[0]
+	}
+	c.Telegram.Website = strings.TrimSpace(c.Telegram.Website)
+	c.Telegram.Channel = strings.TrimSpace(c.Telegram.Channel)
 	if c.Groups == nil {
 		c.Groups = []Group{}
 	}
@@ -1439,15 +1448,20 @@ func refresh() {
 	}
 
 	mu.RLock()
-	tgToken, tgChat := cfg.Telegram.BotToken, cfg.Telegram.ChatID
+	tgToken := cfg.Telegram.BotToken
+	tgChats := append([]string(nil), cfg.Telegram.ChatIDs...)
 	tgEvery := time.Duration(cfg.Telegram.Interval) * time.Minute
+	tgTitle := cfg.Frontend.Title
+	tgWebsite, tgChannel := cfg.Telegram.Website, cfg.Telegram.Channel
 	mu.RUnlock()
 	// 启动时已经用历史记录填过状态，第一轮探测只当基线，不推送。
+	nowPush := time.Now()
 	if !telegramBaselined {
 		telegramBaselined = true
-		markTelegramPushed(time.Now())
-	} else if text := takeTelegram(prevRows, prevOverall, sections, overallStatus, overallLabel, tgEvery, time.Now()); text != "" {
-		if err := sendTelegram(tgToken, tgChat, text); err != nil {
+		markTelegramPushed(nowPush)
+	} else if takeTelegram(prevRows, prevOverall, sections, overallStatus, overallLabel, tgEvery, nowPush) != "" {
+		texts := splitTelegram(formatStatusBoard(tgTitle, sections, nowPush, tgWebsite, tgChannel))
+		if err := sendTelegramAll(tgToken, tgChats, texts); err != nil {
 			log.Println("telegram:", err)
 		}
 	}
@@ -1621,10 +1635,153 @@ func takeTelegram(prev map[string]string, prevOverall string, sections []Section
 	return text
 }
 
+func formatStatusBoard(title string, sections []Section, now time.Time, website, channel string) string {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		title = "分组状态监控"
+	}
+	dup := map[string]int{}
+	for _, sec := range sections {
+		for _, row := range sec.Rows {
+			dup[sec.Name+"\x1f"+row.SubName]++
+		}
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s\n分组状态 | %s", title, now.Format("15:04"))
+	for _, sec := range sections {
+		for _, row := range sec.Rows {
+			name := strings.TrimSpace(row.SubName)
+			if name == "" {
+				name = sec.Name
+			}
+			if dup[sec.Name+"\x1f"+row.SubName] > 1 && strings.TrimSpace(row.Name) != "" {
+				name += " · " + strings.TrimSpace(row.Name)
+			}
+			rate, ok := boardRate(row.Timelines["hour"])
+			rateText := "--"
+			if ok {
+				rateText = fmt.Sprintf("%.2f%%", rate)
+			}
+			fmt.Fprintf(&b, "\n\n%s\n%s %s | %s%s", boardMarks(row.Timelines["hour"]), statusWord(row.Status), rateText, name, boardRatio(row.Ratio))
+		}
+	}
+	if footer := boardFooter(website, channel); footer != "" {
+		b.WriteString("\n\n")
+		b.WriteString(footer)
+	}
+	return b.String()
+}
+
+func boardFooter(website, channel string) string {
+	website = strings.TrimSpace(website)
+	channel = strings.TrimSpace(channel)
+	var parts []string
+	if website != "" {
+		parts = append(parts, "官网："+website)
+	}
+	if channel != "" {
+		parts = append(parts, "通知频道："+channel)
+	}
+	return strings.Join(parts, " ")
+}
+
+func boardRate(buckets []TimelineBucket) (float64, bool) {
+	for i := len(buckets) - 1; i >= 0; i-- {
+		if buckets[i].Samples > 0 {
+			return buckets[i].Rate, true
+		}
+	}
+	return 0, false
+}
+
+func boardMarks(buckets []TimelineBucket) string {
+	if len(buckets) > 12 {
+		buckets = buckets[len(buckets)-12:]
+	}
+	if len(buckets) == 0 {
+		return "⬜"
+	}
+	var b strings.Builder
+	for _, bucket := range buckets {
+		switch {
+		case bucket.Samples == 0:
+			b.WriteString("⬜")
+		case bucket.Rate >= 90:
+			b.WriteString("🟩")
+		case bucket.Rate >= 60:
+			b.WriteString("🟨")
+		default:
+			b.WriteString("🟥")
+		}
+	}
+	return b.String()
+}
+
+func boardRatio(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ""
+	}
+	if strings.Contains(v, "×") || strings.Contains(v, "倍") || strings.ContainsAny(v, "xX") {
+		return " " + v
+	}
+	return " ×" + v
+}
+
+func splitTelegram(text string) []string {
+	if len([]rune(text)) <= 3800 {
+		return []string{text}
+	}
+	parts := strings.Split(text, "\n\n")
+	var out []string
+	var b strings.Builder
+	flush := func() {
+		if b.Len() == 0 {
+			return
+		}
+		out = append(out, b.String())
+		b.Reset()
+	}
+	for _, part := range parts {
+		if b.Len() > 0 && len([]rune(b.String()))+len([]rune(part))+2 > 3800 {
+			flush()
+		}
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(part)
+	}
+	flush()
+	if len(out) == 0 {
+		return []string{text}
+	}
+	return out
+}
+
 var (
 	telegramAPI    = "https://api.telegram.org"
 	telegramClient = &http.Client{Timeout: 12 * time.Second}
 )
+
+func sendTelegramAll(token string, chats []string, texts []string) error {
+	var failed []string
+	for _, chat := range chats {
+		for _, text := range texts {
+			if err := sendTelegram(token, chat, text); err != nil {
+				failed = append(failed, chat+"："+err.Error())
+				break
+			}
+		}
+	}
+	if len(failed) == 0 {
+		return nil
+	}
+	msg := strings.Join(failed, "；")
+	if len([]rune(msg)) > 300 {
+		msg = string([]rune(msg)[:300])
+	}
+	return errors.New(msg)
+}
 
 func sendTelegram(token, chatID, text string) error {
 	token = strings.TrimSpace(token)
