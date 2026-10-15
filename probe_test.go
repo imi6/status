@@ -149,3 +149,19 @@ func TestClassifyProbeStatus(t *testing.T) {
 	insert("out", 0, now)
 	check("out", "down", "异常")
 }
+
+func TestOverallFromRows(t *testing.T) {
+	row := func(status string) GroupResp { return GroupResp{Status: status} }
+	sec := func(rows ...GroupResp) Section { return Section{Rows: rows} }
+	check := func(wantStatus, wantLabel string, sections ...Section) {
+		t.Helper()
+		status, label := overallFromRows(sections)
+		if status != wantStatus || label != wantLabel {
+			t.Fatalf("got %s %s, want %s %s", status, label, wantStatus, wantLabel)
+		}
+	}
+	check("up", "运行正常", sec(row("up"), row("up"), row("up"), row("up"), row("degraded")))
+	check("degraded", "降级", sec(row("degraded"), row("degraded"), row("degraded"), row("up"), row("up")))
+	check("degraded", "降级", sec(row("degraded")))
+	check("down", "部分异常", sec(row("up"), row("up"), row("up"), row("up"), row("down")))
+}

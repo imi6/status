@@ -198,6 +198,33 @@ func updateSubGroup(c *Config, group, name, newName, slug string) error {
 	return nil
 }
 
+func copySubGroup(c *Config, group, name, newName, slug string) error {
+	gi := findGroup(c, strings.TrimSpace(group))
+	if gi < 0 {
+		return errors.New("分组不存在")
+	}
+	si := findSub(&c.Groups[gi], strings.TrimSpace(name))
+	if si < 0 {
+		return errors.New("子组不存在")
+	}
+	newName, err := cleanName(newName, "子组名称")
+	if err != nil {
+		return err
+	}
+	if findSub(&c.Groups[gi], newName) >= 0 {
+		return errors.New("子组已存在")
+	}
+	slug = strings.TrimSpace(slug)
+	if strings.ContainsAny(slug, " \r\n") {
+		return errors.New("Kuma slug 不能包含空格")
+	}
+	src := c.Groups[gi].SubGroups[si]
+	models := make([]Model, len(src.Models))
+	copy(models, src.Models)
+	c.Groups[gi].SubGroups = append(c.Groups[gi].SubGroups, SubGroup{Name: newName, KumaSlug: slug, Models: models})
+	return nil
+}
+
 func deleteSubGroup(c *Config, group, name string) error {
 	gi := findGroup(c, strings.TrimSpace(group))
 	if gi < 0 {
@@ -385,7 +412,54 @@ func serveAdminPage(w http.ResponseWriter, r *http.Request) {
 	serveAsset(w, r, "admin.html")
 }
 
-func applySettings(c *Config, port, interval, cooldown int, adminPath, defaultBase string, front FrontendConfig, kuma KumaConfig) error {
+func cleanTelegram(t TelegramConfig) (TelegramConfig, error) {
+	t.BotToken = strings.TrimSpace(t.BotToken)
+	t.ChatID = strings.TrimSpace(t.ChatID)
+	if t.BotToken == "" && t.ChatID == "" {
+		return t, nil
+	}
+	if t.BotToken == "" || t.ChatID == "" {
+		return t, errors.New("Telegram 需要同时填写 Bot Token 和群组 ID")
+	}
+	if len(t.BotToken) > 200 || strings.ContainsAny(t.BotToken, " \r\n") || !strings.Contains(t.BotToken, ":") {
+		return t, errors.New("Bot Token 格式不正确")
+	}
+	if !validTelegramChat(t.ChatID) {
+		return t, errors.New("群组 ID 需为数字，或以 @ 开头的频道用户名")
+	}
+	return t, nil
+}
+
+func validTelegramChat(id string) bool {
+	if strings.HasPrefix(id, "@") {
+		name := id[1:]
+		if len(name) < 5 || len(name) > 32 {
+			return false
+		}
+		for i, r := range name {
+			ok := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_'
+			if !ok || (i == 0 && r >= '0' && r <= '9') {
+				return false
+			}
+		}
+		return true
+	}
+	rest := id
+	if strings.HasPrefix(rest, "-") {
+		rest = rest[1:]
+	}
+	if rest == "" || len(rest) > 20 {
+		return false
+	}
+	for _, r := range rest {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func applySettings(c *Config, port, interval, cooldown int, adminPath, defaultBase string, front FrontendConfig, kuma KumaConfig, telegram TelegramConfig) error {
 	if port < 1 || port > 65535 {
 		return errors.New("端口需在 1 到 65535")
 	}
@@ -418,6 +492,10 @@ func applySettings(c *Config, port, interval, cooldown int, adminPath, defaultBa
 	if err != nil {
 		return err
 	}
+	telegram, err = cleanTelegram(telegram)
+	if err != nil {
+		return err
+	}
 	c.Port = port
 	c.Interval = interval
 	c.ManualRefreshCooldown = cooldown
@@ -425,6 +503,7 @@ func applySettings(c *Config, port, interval, cooldown int, adminPath, defaultBa
 	c.DefaultBaseURL = base
 	c.Frontend = front
 	c.Kuma = kuma
+	c.Telegram = telegram
 	return nil
 }
 
@@ -701,6 +780,11 @@ func apiAdmin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		adminUpstreamModels(w, r)
+	case "telegram-test":
+		if !requireAdmin(w, r) {
+			return
+		}
+		adminTelegramTest(w, r)
 	default:
 		writeAdminJSON(w, 404, map[string]string{"error": "not found"})
 	}
@@ -769,6 +853,7 @@ type adminConfigView struct {
 	DefaultBaseURL        string         `json:"defaultBaseURL"`
 	Frontend              FrontendConfig `json:"frontend"`
 	Kuma                  KumaConfig     `json:"kuma"`
+	Telegram              TelegramConfig `json:"telegram"`
 	Groups                []Group        `json:"groups"`
 }
 
@@ -782,6 +867,7 @@ func adminGetConfig(w http.ResponseWriter, r *http.Request) {
 		DefaultBaseURL:        cfg.DefaultBaseURL,
 		Frontend:              cfg.Frontend,
 		Kuma:                  cfg.Kuma,
+		Telegram:              cfg.Telegram,
 		Groups:                cfg.Groups,
 	}
 	mu.RUnlock()
@@ -800,14 +886,40 @@ func adminSaveSettings(w http.ResponseWriter, r *http.Request) {
 		DefaultBaseURL        string         `json:"defaultBaseURL"`
 		Frontend              FrontendConfig `json:"frontend"`
 		Kuma                  KumaConfig     `json:"kuma"`
+		Telegram              TelegramConfig `json:"telegram"`
 	}
 	if !decodeBody(w, r, &body) {
 		return
 	}
 	err := updateConfig(func(c *Config) error {
-		return applySettings(c, body.Port, body.Interval, body.ManualRefreshCooldown, body.AdminPath, body.DefaultBaseURL, body.Frontend, body.Kuma)
+		return applySettings(c, body.Port, body.Interval, body.ManualRefreshCooldown, body.AdminPath, body.DefaultBaseURL, body.Frontend, body.Kuma, body.Telegram)
 	})
 	finishChange(w, err, false)
+}
+
+func adminTelegramTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeAdminJSON(w, 405, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var body TelegramConfig
+	if !decodeBody(w, r, &body) {
+		return
+	}
+	cleaned, err := cleanTelegram(body)
+	if err != nil {
+		writeAdminJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+	if cleaned.BotToken == "" {
+		writeAdminJSON(w, 400, map[string]string{"error": "请先填写 Bot Token 和群组 ID"})
+		return
+	}
+	if err := sendTelegram(cleaned.BotToken, cleaned.ChatID, "监控已连接到这个群。之后只在分组状态变化时推送。"); err != nil {
+		writeAdminJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+	writeAdminJSON(w, 200, map[string]bool{"ok": true})
 }
 
 func adminChangePassword(w http.ResponseWriter, r *http.Request) {
@@ -886,6 +998,7 @@ type subBody struct {
 	Name     string `json:"name"`
 	NewName  string `json:"newName"`
 	KumaSlug string `json:"kumaSlug"`
+	Copy     bool   `json:"copy"`
 }
 
 func adminSubGroups(w http.ResponseWriter, r *http.Request) {
@@ -895,9 +1008,13 @@ func adminSubGroups(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodPost:
-		finishChange(w, updateConfig(func(c *Config) error {
+		err := updateConfig(func(c *Config) error {
+			if body.Copy {
+				return copySubGroup(c, body.Group, body.Name, body.NewName, body.KumaSlug)
+			}
 			return addSubGroup(c, body.Group, body.Name, body.KumaSlug)
-		}), true)
+		})
+		finishChange(w, err, true)
 	case http.MethodPut:
 		newName := body.NewName
 		if strings.TrimSpace(newName) == "" {

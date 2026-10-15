@@ -314,6 +314,77 @@ func TestAdminPathReplacesDefaultRoute(t *testing.T) {
 	}
 }
 
+func TestTelegramDigestAndSend(t *testing.T) {
+	if telegramDigest(nil, "", nil, "up", "运行正常") != "" {
+		t.Fatal("first snapshot should stay quiet")
+	}
+	prev := map[string]string{"Claude\x1fClaude Max\x1fhaiku": "degraded", "GPT\x1fGPT Pro\x1fterra": "up"}
+	sections := []Section{
+		{Name: "Claude", Rows: []GroupResp{{Name: "haiku", SubName: "Claude Max", Status: "up"}}},
+		{Name: "GPT", Rows: []GroupResp{{Name: "terra", SubName: "GPT Pro", Status: "up"}}},
+	}
+	text := telegramDigest(prev, "degraded", sections, "up", "运行正常")
+	if !strings.Contains(text, "Claude / Claude Max") || !strings.Contains(text, "降级 → 正常") || !strings.Contains(text, "整体：降级 → 运行正常") {
+		t.Fatalf("digest:\n%s", text)
+	}
+	if strings.Contains(text, "terra") {
+		t.Fatal("unchanged model should be omitted")
+	}
+	if _, err := cleanTelegram(TelegramConfig{BotToken: "123:abc", ChatID: "-1001"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cleanTelegram(TelegramConfig{BotToken: "123:abc"}); err == nil {
+		t.Fatal("missing chat")
+	}
+
+	var gotChat, gotText string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			ChatID string `json:"chat_id"`
+			Text   string `json:"text"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		gotChat, gotText = body.ChatID, body.Text
+		if !strings.HasPrefix(r.URL.Path, "/bot") || !strings.HasSuffix(r.URL.Path, "/sendMessage") {
+			t.Fatalf("path %s", r.URL.Path)
+		}
+		w.Header().Set("content-type", "application/json")
+		io.WriteString(w, `{"ok":true}`)
+	}))
+	defer srv.Close()
+	old := telegramAPI
+	telegramAPI = srv.URL
+	t.Cleanup(func() { telegramAPI = old })
+	if err := sendTelegram("123:abc", "-1001", "hi"); err != nil {
+		t.Fatal(err)
+	}
+	if gotChat != "-1001" || gotText != "hi" {
+		t.Fatalf("sent %q %q", gotChat, gotText)
+	}
+}
+
+func TestCopySubGroup(t *testing.T) {
+	c := Config{Groups: []Group{{Name: "Claude", SubGroups: []SubGroup{{
+		Name:     "Claude Max",
+		KumaSlug: "claude",
+		Models:   []Model{{ID: "claude-haiku", Provider: "anthropic", BaseURL: "https://www.zzshu.cc/v1", Key: "sk", Timeout: 60}},
+	}}}}}
+	if err := copySubGroup(&c, "Claude", "Claude Max", "Claude Max 副本", ""); err != nil {
+		t.Fatal(err)
+	}
+	got := c.Groups[0].SubGroups
+	if len(got) != 2 || got[1].Name != "Claude Max 副本" || got[1].KumaSlug != "" || len(got[1].Models) != 1 || got[1].Models[0].Key != "sk" {
+		t.Fatalf("%+v", got[1])
+	}
+	got[1].Models[0].Key = "changed"
+	if got[0].Models[0].Key != "sk" {
+		t.Fatal("source key changed")
+	}
+	if err := copySubGroup(&c, "Claude", "Claude Max", "Claude Max 副本", ""); err == nil {
+		t.Fatal("expected duplicate name")
+	}
+}
+
 func TestEmptyModelBaseUsesDefault(t *testing.T) {
 	got, err := cleanDefaultBase("zzshu.cc")
 	if err != nil || got != "https://zzshu.cc" {

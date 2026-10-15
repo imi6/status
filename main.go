@@ -5,12 +5,14 @@ import (
 	"crypto/tls"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,7 +39,13 @@ type Config struct {
 	DefaultBaseURL        string         `json:"defaultBaseURL"`        // 新建模型时使用的默认接口地址
 	Frontend              FrontendConfig `json:"frontend"`
 	Kuma                  KumaConfig     `json:"kuma"`
+	Telegram              TelegramConfig `json:"telegram"`
 	Groups                []Group        `json:"groups"`
+}
+
+type TelegramConfig struct {
+	BotToken string `json:"botToken"`
+	ChatID   string `json:"chatID"`
 }
 
 type KumaConfig struct {
@@ -176,6 +184,8 @@ func normalizeConfig(c *Config) {
 	} else if cleaned, err := cleanDefaultBase(c.DefaultBaseURL); err == nil {
 		c.DefaultBaseURL = cleaned
 	}
+	c.Telegram.BotToken = strings.TrimSpace(c.Telegram.BotToken)
+	c.Telegram.ChatID = strings.TrimSpace(c.Telegram.ChatID)
 	if c.Groups == nil {
 		c.Groups = []Group{}
 	}
@@ -673,21 +683,25 @@ func classifyProbeStatus(groupName, subName, modelID string, now time.Time) (str
 }
 
 func overallFromRows(sections []Section) (string, string) {
-	anyDown, anyDegraded := false, false
+	var total, degraded, down int
 	for _, sec := range sections {
 		for _, r := range sec.Rows {
 			switch r.Status {
 			case "down":
-				anyDown = true
+				down++
+				total++
 			case "degraded":
-				anyDegraded = true
+				degraded++
+				total++
+			case "up":
+				total++
 			}
 		}
 	}
-	if anyDown {
+	if down > 0 {
 		return "down", "部分异常"
 	}
-	if anyDegraded {
+	if total > 0 && degraded*2 >= total {
 		return "degraded", "降级"
 	}
 	return "up", "运行正常"
@@ -1079,6 +1093,16 @@ func refresh() {
 
 	loadConfig()
 
+	prevRows := map[string]string{}
+	mu.RLock()
+	prevOverall := statusV2.Overall.Status
+	for _, sec := range statusV2.Sections {
+		for _, r := range sec.Rows {
+			prevRows[sec.Name+"\x1f"+r.SubName+"\x1f"+r.Name] = r.Status
+		}
+	}
+	mu.RUnlock()
+
 	// 以当前已有状态为起点，逐个检测并实时更新
 	mu.RLock()
 	sections := statusV2.Sections
@@ -1196,7 +1220,145 @@ func refresh() {
 		}
 	}
 
+	mu.RLock()
+	tgToken, tgChat := cfg.Telegram.BotToken, cfg.Telegram.ChatID
+	mu.RUnlock()
+	if text := telegramDigest(prevRows, prevOverall, sections, overallStatus, overallLabel); text != "" {
+		if err := sendTelegram(tgToken, tgChat, text); err != nil {
+			log.Println("telegram:", err)
+		}
+	}
+
 	cleanupOld()
+}
+
+func statusWord(status string) string {
+	switch status {
+	case "up":
+		return "正常"
+	case "degraded":
+		return "降级"
+	case "down":
+		return "异常"
+	default:
+		return "无采样"
+	}
+}
+
+func overallWord(status string) string {
+	switch status {
+	case "down":
+		return "部分异常"
+	case "degraded":
+		return "降级"
+	case "up":
+		return "运行正常"
+	default:
+		return "采样中"
+	}
+}
+
+func telegramDigest(prev map[string]string, prevOverall string, sections []Section, overall, overallLabel string) string {
+	if prevOverall == "" && len(prev) == 0 {
+		return ""
+	}
+	type item struct {
+		group, sub, model, from, to string
+	}
+	var items []item
+	for _, sec := range sections {
+		for _, r := range sec.Rows {
+			old, ok := prev[sec.Name+"\x1f"+r.SubName+"\x1f"+r.Name]
+			if !ok || old == "" || old == r.Status {
+				continue
+			}
+			items = append(items, item{sec.Name, r.SubName, r.Name, old, r.Status})
+		}
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].group != items[j].group {
+			return items[i].group < items[j].group
+		}
+		if items[i].sub != items[j].sub {
+			return items[i].sub < items[j].sub
+		}
+		return items[i].model < items[j].model
+	})
+	extra := 0
+	if len(items) > 30 {
+		extra = len(items) - 30
+		items = items[:30]
+	}
+	var b strings.Builder
+	if len(items) > 0 {
+		b.WriteString("状态变化")
+		for _, it := range items {
+			fmt.Fprintf(&b, "\n\n%s / %s\n%s\n%s → %s", it.group, it.sub, it.model, statusWord(it.from), statusWord(it.to))
+		}
+		if extra > 0 {
+			fmt.Fprintf(&b, "\n\n还有 %d 项变化", extra)
+		}
+	}
+	if prevOverall != "" && overall != "" && prevOverall != overall {
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		label := overallLabel
+		if label == "" {
+			label = overallWord(overall)
+		}
+		fmt.Fprintf(&b, "整体：%s → %s", overallWord(prevOverall), label)
+	}
+	return b.String()
+}
+
+var (
+	telegramAPI    = "https://api.telegram.org"
+	telegramClient = &http.Client{Timeout: 12 * time.Second}
+)
+
+func sendTelegram(token, chatID, text string) error {
+	token = strings.TrimSpace(token)
+	chatID = strings.TrimSpace(chatID)
+	text = strings.TrimSpace(text)
+	if token == "" || chatID == "" || text == "" {
+		return nil
+	}
+	payload, err := json.Marshal(map[string]any{
+		"chat_id":                  chatID,
+		"text":                     text,
+		"disable_web_page_preview": true,
+	})
+	if err != nil {
+		return errors.New("无法编码 Telegram 消息")
+	}
+	req, err := http.NewRequest(http.MethodPost, telegramAPI+"/bot"+token+"/sendMessage", bytes.NewReader(payload))
+	if err != nil {
+		return errors.New("无法创建 Telegram 请求")
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := telegramClient.Do(req)
+	if err != nil {
+		return errors.New("无法连接 Telegram")
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	var parsed struct {
+		OK          bool   `json:"ok"`
+		Description string `json:"description"`
+	}
+	_ = json.Unmarshal(body, &parsed)
+	if resp.StatusCode == http.StatusOK && parsed.OK {
+		return nil
+	}
+	msg := strings.TrimSpace(parsed.Description)
+	if msg == "" {
+		msg = "推送失败"
+	}
+	if len(msg) > 200 {
+		msg = msg[:200]
+	}
+	return errors.New(msg)
 }
 
 func pingKuma(slug string, up bool, pingMs int) {

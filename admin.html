@@ -83,9 +83,11 @@ textarea{min-height:72px;resize:vertical}
 .keyline input,.keyline select{flex:1;min-width:0}
 .empty{color:var(--faint);padding:8px 0}
 .tabs{display:flex;gap:8px;margin-top:18px}
+.group-tabs{display:flex;gap:8px;margin-top:14px;overflow-x:auto;padding-bottom:4px}
 .tab{
   background:var(--panel);color:var(--dim);border:1px solid var(--border);
   border-radius:999px;padding:7px 16px;cursor:pointer;font:inherit;font-weight:650;
+  flex:none;white-space:nowrap;
 }
 .tab.active{background:var(--accent);color:#fff;border-color:transparent}
 .modal{
@@ -159,10 +161,12 @@ textarea{min-height:72px;resize:vertical}
           <label>后台路径<input name="adminPath" required minlength="8" maxlength="64" spellcheck="false" pattern="[A-Za-z0-9_-]{8,64}" placeholder="例如 panel-9f3k2a"></label>
           <label>Kuma 地址<input name="kumaBase" spellcheck="false" placeholder="https://status.example.com"></label>
           <label>Kuma Slug<input name="kumaSlug" spellcheck="false"></label>
+          <label class="wide">Telegram Bot Token<input name="tgToken" type="password" autocomplete="new-password" spellcheck="false" placeholder="123456:ABC..."></label>
+          <label>Telegram 群组 ID<input name="tgChat" spellcheck="false" placeholder="-1001234567890"></label>
           <label class="wide">页脚 HTML<textarea name="footer"></textarea></label>
         </div>
-        <p class="hint">后台路径就是地址里的目录名，不要用 admin 这种常见词。修改路径或端口后需要重启进程。状态页不会显示这个入口。默认接口地址会填进新建模型，留空则使用 https://zzshu.cc。</p>
-        <div class="row-actions"><button type="submit">保存站点设置</button></div>
+        <p class="hint">后台路径就是地址里的目录名，不要用 admin 这种常见词。修改路径或端口后需要重启进程。状态页不会显示这个入口。默认接口地址会填进新建模型，留空则使用 https://zzshu.cc。把机器人拉进目标群后填写 Token 和群组 ID，只在分组状态变化时推送，不会每次探测都发。</p>
+        <div class="row-actions"><button type="submit">保存站点设置</button><button type="button" class="ghost" id="tgTest">发送测试</button></div>
       </form>
     </section>
 
@@ -182,6 +186,7 @@ textarea{min-height:72px;resize:vertical}
     <section class="card">
       <h2>模型</h2>
       <div class="row-actions"><button type="button" id="addGroupBtn">添加分组</button></div>
+      <div class="group-tabs" id="groupTabs" hidden></div>
       <div id="groups"></div>
     </section>
     </div>
@@ -209,6 +214,7 @@ textarea{min-height:72px;resize:vertical}
       <label>子组名称<input name="name" required></label>
       <label>Kuma slug<input name="kumaSlug" spellcheck="false"></label>
     </div>
+    <p class="hint" id="subCopyHint" hidden>会复制该子组下的全部模型和密钥。Kuma slug 留空则不共用原来的监控项。</p>
     <p class="hint">状态页卡片标题是子组名称，分组名只出现在顶部分组切换里。探针使用所选模型，不在卡片标题上显示模型名。</p>
     <div class="row-actions">
       <button type="submit">保存</button>
@@ -314,22 +320,34 @@ function fillSettings(){
   f.adminPath.value = state.adminPath || '';
   f.kumaBase.value = kuma.baseURL || '';
   f.kumaSlug.value = kuma.slug || '';
+  const tg = state.telegram || {};
+  f.tgToken.value = tg.botToken || '';
+  f.tgChat.value = tg.chatID || '';
 }
+let _modelGroup = '';
 function render(){
   const root = $('groups');
+  const tabs = $('groupTabs');
   const groups = state.groups || [];
   if (!groups.length){
+    _modelGroup = '';
+    tabs.hidden = true;
+    tabs.innerHTML = '';
     root.innerHTML = '<p class="empty">还没有分组。</p>';
     return;
   }
-  root.innerHTML = groups.map(g => {
+  if (!groups.some(g => g.name === _modelGroup)) _modelGroup = groups[0].name;
+  tabs.hidden = false;
+  tabs.innerHTML = groups.map(g => '<button type="button" class="tab' + (g.name === _modelGroup ? ' active' : '') + '" data-model-group="' + escapeHtml(g.name) + '">' + escapeHtml(g.name) + '</button>').join('');
+  const shown = groups.filter(g => g.name === _modelGroup);
+  root.innerHTML = shown.map(g => {
     const subs = g.subGroups || [];
     const subHtml = subs.length ? subs.map(sg => {
       const models = sg.models || [];
       const modelHtml = models.length ? models.map((m, mi) => (
         '<div class="model"><div><b>' + escapeHtml(m.id) + '</b><span>' + escapeHtml(providerLabel(m.provider)) + ' · ' + escapeHtml(m.baseURL || '') + ' · ' + escapeHtml(maskKey(m.key)) + ' · ' + (m.timeout || 30) + 's</span></div><div class="links"><button type="button" data-act="edit-model" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '" data-index="' + mi + '">编辑</button> <button type="button" class="warn" data-act="del-model" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '" data-index="' + mi + '">删除</button></div></div>'
       )).join('') : '<p class="empty">此子组还没有模型。</p>';
-      return '<div class="subgroup"><div class="sub-head"><div><h4>' + escapeHtml(sg.name) + '</h4><div class="meta">' + (sg.kumaSlug ? ('Kuma ' + escapeHtml(sg.kumaSlug)) : '未设置独立 Kuma') + '</div></div><div class="links"><button type="button" data-act="add-model" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '">添加模型</button> <button type="button" data-act="edit-sub" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '">编辑</button> <button type="button" class="warn" data-act="del-sub" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '">删除</button></div></div>' + modelHtml + '</div>';
+      return '<div class="subgroup"><div class="sub-head"><div><h4>' + escapeHtml(sg.name) + '</h4><div class="meta">' + (sg.kumaSlug ? ('Kuma ' + escapeHtml(sg.kumaSlug)) : '未设置独立 Kuma') + '</div></div><div class="links"><button type="button" data-act="add-model" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '">添加模型</button> <button type="button" data-act="edit-sub" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '">编辑</button> <button type="button" data-act="copy-sub" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '">复制</button> <button type="button" class="warn" data-act="del-sub" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '">删除</button></div></div>' + modelHtml + '</div>';
     }).join('') : '<p class="empty">此分组还没有子组。</p>';
     return '<section class="group"><div class="group-head"><div><h3>' + escapeHtml(g.name) + '</h3><div class="meta">' + (g.manualRefresh ? '显示手动刷新' : '无手动刷新') + '</div></div><div class="links"><button type="button" data-act="add-sub" data-group="' + escapeHtml(g.name) + '">添加子组</button> <button type="button" data-act="edit-group" data-group="' + escapeHtml(g.name) + '">编辑</button> <button type="button" class="warn" data-act="del-group" data-group="' + escapeHtml(g.name) + '">删除</button></div></div>' + subHtml + '</section>';
   }).join('');
@@ -344,6 +362,13 @@ function findGroup(name){ return (state.groups || []).find(g => g.name === name)
 function findSub(group, name){
   const g = findGroup(group);
   return g && (g.subGroups || []).find(sg => sg.name === name);
+}
+function nextCopyName(group, name){
+  const base = name + ' 副本';
+  if (!findSub(group, base)) return base;
+  let n = 2;
+  while (findSub(group, base + ' ' + n)) n++;
+  return base + ' ' + n;
 }
 
 $('login').addEventListener('submit', async (e) => {
@@ -375,9 +400,17 @@ $('settingsForm').addEventListener('submit', async (e) => {
       manualRefreshCooldown: Number(f.cooldown.value),
       frontend: {title:f.title.value, subtitle:f.subtitle.value, icon:f.icon.value, footer:f.footer.value},
       defaultBaseURL: f.defaultBaseURL.value,
-      kuma: {baseURL:f.kumaBase.value, slug:f.kumaSlug.value}
+      kuma: {baseURL:f.kumaBase.value, slug:f.kumaSlug.value},
+      telegram: {botToken:f.tgToken.value, chatID:f.tgChat.value}
     }});
     await reload('站点设置已保存。');
+  } catch (err) { showMsg(err.message, true); }
+});
+$('tgTest').addEventListener('click', async () => {
+  const f = $('settingsForm');
+  try {
+    await api('/api/admin/telegram-test', {method:'POST', body:{botToken:f.tgToken.value, chatID:f.tgChat.value}});
+    showMsg('测试消息已发到群里。保存设置后才会在状态变化时自动推送。', false);
   } catch (err) { showMsg(err.message, true); }
 });
 $('passwordForm').addEventListener('submit', async (e) => {
@@ -408,6 +441,7 @@ $('groupForm').addEventListener('submit', async (e) => {
     } else {
       await api('/api/admin/groups', {method:'PUT', body:{name:editing.original, newName:f.name.value, manualRefresh}});
     }
+    _modelGroup = f.name.value.trim();
     hideForms();
     await reload('分组已保存，并已安排检测。');
   } catch (err) { showMsg(err.message, true); }
@@ -418,6 +452,8 @@ $('subForm').addEventListener('submit', async (e) => {
   try {
     if (editing.mode === 'create') {
       await api('/api/admin/subgroups', {method:'POST', body:{group:editing.group, name:f.name.value, kumaSlug:f.kumaSlug.value}});
+    } else if (editing.mode === 'copy') {
+      await api('/api/admin/subgroups', {method:'POST', body:{group:editing.group, name:editing.original, newName:f.name.value, kumaSlug:f.kumaSlug.value, copy:true}});
     } else {
       await api('/api/admin/subgroups', {method:'PUT', body:{group:editing.group, name:editing.original, newName:f.name.value, kumaSlug:f.kumaSlug.value}});
     }
@@ -502,6 +538,12 @@ document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   hideForms();
 });
+$('groupTabs').addEventListener('click', (e) => {
+  const tab = e.target.closest('[data-model-group]');
+  if (!tab) return;
+  _modelGroup = tab.dataset.modelGroup || '';
+  render();
+});
 $('adminTabs').addEventListener('click', (e) => {
   const tab = e.target.closest('.tab');
   if (!tab) return;
@@ -534,6 +576,7 @@ $('groups').addEventListener('click', (e) => {
     editing = {mode:'create', group};
     const f = $('subForm');
     $('subFormTitle').textContent = '添加子组';
+    $('subCopyHint').hidden = true;
     f.name.value = '';
     f.kumaSlug.value = '';
     openModal('subModal');
@@ -544,10 +587,23 @@ $('groups').addEventListener('click', (e) => {
     editing = {mode:'edit', group, original:sg.name};
     const f = $('subForm');
     $('subFormTitle').textContent = '编辑子组';
+    $('subCopyHint').hidden = true;
     f.name.value = sg.name;
     f.kumaSlug.value = sg.kumaSlug || '';
     openModal('subModal');
     f.name.focus();
+  } else if (act === 'copy-sub') {
+    const sg = findSub(group, sub);
+    if (!sg) return;
+    editing = {mode:'copy', group, original:sg.name};
+    const f = $('subForm');
+    $('subFormTitle').textContent = '复制子组';
+    $('subCopyHint').hidden = false;
+    f.name.value = nextCopyName(group, sg.name);
+    f.kumaSlug.value = '';
+    openModal('subModal');
+    f.name.focus();
+    f.name.select();
   } else if (act === 'del-sub') {
     if (!confirm('删除子组「' + sub + '」及其模型？')) return;
     api('/api/admin/subgroups', {method:'DELETE', body:{group, name:sub}}).then(() => reload('子组已删除。')).catch(err => showMsg(err.message, true));
