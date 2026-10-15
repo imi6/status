@@ -82,6 +82,26 @@ textarea{min-height:72px;resize:vertical}
 .keyline{display:flex;gap:8px;align-items:center}
 .keyline input,.keyline select{flex:1;min-width:0}
 .empty{color:var(--faint);padding:8px 0}
+.tabs{display:flex;gap:8px;margin-top:18px}
+.tab{
+  background:var(--panel);color:var(--dim);border:1px solid var(--border);
+  border-radius:999px;padding:7px 16px;cursor:pointer;font:inherit;font-weight:650;
+}
+.tab.active{background:var(--accent);color:#fff;border-color:transparent}
+.modal{
+  position:fixed;inset:0;z-index:60;display:grid;place-items:center;
+  padding:24px 16px;background:rgba(28,36,48,.42);
+}
+.modal[hidden]{display:none}
+.modal-card{
+  width:min(640px,100%);max-height:calc(100vh - 48px);overflow:auto;
+  background:var(--panel);border-radius:var(--radius);box-shadow:var(--shadow);padding:20px;
+}
+.modal-card h2{font-size:16px;font-weight:680;margin-bottom:14px}
+#msg:not([hidden]){
+  position:fixed;left:50%;top:16px;transform:translateX(-50%);z-index:80;
+  min-width:240px;max-width:min(560px,calc(100% - 32px));box-shadow:var(--shadow);
+}
 @media(max-width:720px){
   .grid{grid-template-columns:1fr}
   .top,.group-head,.sub-head,.model{flex-direction:column}
@@ -119,7 +139,12 @@ textarea{min-height:72px;resize:vertical}
       </div>
     </div>
     <p id="msg" class="msg" hidden></p>
+    <div class="tabs" id="adminTabs">
+      <button type="button" class="tab active" data-tab="settings">系统设置</button>
+      <button type="button" class="tab" data-tab="models">模型</button>
+    </div>
 
+    <div id="panelSettings">
     <section class="card">
       <h2>站点</h2>
       <form id="settingsForm">
@@ -151,75 +176,83 @@ textarea{min-height:72px;resize:vertical}
         <div class="row-actions"><button type="submit">修改密码</button></div>
       </form>
     </section>
+    </div>
 
+    <div id="panelModels" hidden>
     <section class="card">
       <h2>模型</h2>
       <div class="row-actions"><button type="button" id="addGroupBtn">添加分组</button></div>
-
-      <form id="groupForm" class="card" hidden autocomplete="off">
-        <h2 id="groupFormTitle">添加分组</h2>
-        <div class="grid">
-          <label class="wide">分组名称<input name="name" required></label>
-          <label class="check"><input name="manualRefresh" type="checkbox">显示手动刷新按钮</label>
-        </div>
-        <div class="row-actions">
-          <button type="submit">保存</button>
-          <button type="button" class="ghost" data-close="groupForm">取消</button>
-        </div>
-      </form>
-
-      <form id="subForm" class="card" hidden autocomplete="off">
-        <h2 id="subFormTitle">添加子组</h2>
-        <div class="grid">
-          <label>子组名称<input name="name" required></label>
-          <label>Kuma slug<input name="kumaSlug" spellcheck="false"></label>
-        </div>
-        <p class="hint">状态页卡片标题是分组名称，副标题是子组名称。探针使用所选模型，不在卡片标题上显示模型名。</p>
-        <div class="row-actions">
-          <button type="submit">保存</button>
-          <button type="button" class="ghost" data-close="subForm">取消</button>
-        </div>
-      </form>
-
-      <form id="modelForm" class="card" hidden autocomplete="off">
-        <h2 id="modelFormTitle">添加模型</h2>
-        <div class="grid">
-          <label>协议
-            <select name="provider">
-              <option value="openai-compat">OpenAI 兼容</option>
-              <option value="openai-response">OpenAI Responses</option>
-              <option value="google">Google Gemini</option>
-              <option value="anthropic">Anthropic</option>
-            </select>
-          </label>
-          <label>超时（秒）<input name="timeout" type="number" min="1" max="300" value="30" required></label>
-          <label class="wide">地址<input name="baseURL" spellcheck="false" placeholder="https://zzshu.cc"></label>
-          <label class="wide">密钥
-            <span class="keyline">
-              <input name="key" type="password" autocomplete="new-password" spellcheck="false">
-              <button type="button" class="ghost" id="toggleKey">显示</button>
-            </span>
-          </label>
-          <label class="wide">模型
-            <span class="keyline">
-              <select name="id" required>
-                <option value="">先获取可探测的模型</option>
-              </select>
-              <button type="button" class="ghost" id="loadModels">获取模型</button>
-            </span>
-          </label>
-        </div>
-        <p class="hint">地址留空时使用上面的默认接口地址。网站根地址和带 /v1 的地址都可以，NewAPI、OpenAI 兼容会自动补上 /v1。每次探测向所选模型发送 hi，等它返回文字后才算可用。</p>
-        <p class="hint" id="keyHint" hidden>编辑时密钥留空会继续用原来的密钥获取模型。</p>
-        <div class="row-actions">
-          <button type="submit">保存</button>
-          <button type="button" class="ghost" data-close="modelForm">取消</button>
-        </div>
-      </form>
-
       <div id="groups"></div>
     </section>
+    </div>
   </div>
+</div>
+
+<div class="modal" id="groupModal" hidden>
+  <form id="groupForm" class="modal-card" autocomplete="off">
+    <h2 id="groupFormTitle">添加分组</h2>
+    <div class="grid">
+      <label class="wide">分组名称<input name="name" required></label>
+      <label class="check"><input name="manualRefresh" type="checkbox">显示手动刷新按钮</label>
+    </div>
+    <div class="row-actions">
+      <button type="submit">保存</button>
+      <button type="button" class="ghost" data-close="groupModal">取消</button>
+    </div>
+  </form>
+</div>
+
+<div class="modal" id="subModal" hidden>
+  <form id="subForm" class="modal-card" autocomplete="off">
+    <h2 id="subFormTitle">添加子组</h2>
+    <div class="grid">
+      <label>子组名称<input name="name" required></label>
+      <label>Kuma slug<input name="kumaSlug" spellcheck="false"></label>
+    </div>
+    <p class="hint">状态页卡片标题是分组名称，副标题是子组名称。探针使用所选模型，不在卡片标题上显示模型名。</p>
+    <div class="row-actions">
+      <button type="submit">保存</button>
+      <button type="button" class="ghost" data-close="subModal">取消</button>
+    </div>
+  </form>
+</div>
+
+<div class="modal" id="modelModal" hidden>
+  <form id="modelForm" class="modal-card" autocomplete="off">
+    <h2 id="modelFormTitle">添加模型</h2>
+    <div class="grid">
+      <label>协议
+        <select name="provider">
+          <option value="openai-compat">OpenAI 兼容</option>
+          <option value="openai-response">OpenAI Responses</option>
+          <option value="google">Google Gemini</option>
+          <option value="anthropic">Anthropic</option>
+        </select>
+      </label>
+      <label>超时（秒）<input name="timeout" type="number" min="1" max="300" value="30" required></label>
+      <label class="wide">地址<input name="baseURL" spellcheck="false" placeholder="https://zzshu.cc"></label>
+      <label class="wide">密钥
+        <span class="keyline">
+          <input name="key" type="password" autocomplete="new-password" spellcheck="false">
+          <button type="button" class="ghost" id="toggleKey">显示</button>
+        </span>
+      </label>
+      <label class="wide">模型
+        <span class="keyline">
+          <select name="id" required>
+            <option value="">先获取可探测的模型</option>
+          </select>
+          <button type="button" class="ghost" id="loadModels">获取模型</button>
+        </span>
+      </label>
+    </div>
+    <p class="hint">地址留空时使用站点设置里的默认接口地址。网站根地址和带 /v1 的地址都可以，NewAPI、OpenAI 兼容会自动补上 /v1。每次探测向所选模型发送 hi，等它返回文字后才算可用。</p>
+    <p class="hint" id="keyHint" hidden>编辑时密钥留空会继续用原来的密钥获取模型。</p>
+    <div class="row-actions">
+      <button type="submit">保存</button>
+      <button type="button" class="ghost" data-close="modelModal">取消</button>
+    </div>
+  </form>
 </div>
 <script>
 const $ = (id) => document.getElementById(id);
@@ -258,9 +291,13 @@ async function api(path, opt){
   return data;
 }
 function hideForms(){
-  $('groupForm').hidden = true;
-  $('subForm').hidden = true;
-  $('modelForm').hidden = true;
+  $('groupModal').hidden = true;
+  $('subModal').hidden = true;
+  $('modelModal').hidden = true;
+}
+function openModal(id){
+  hideForms();
+  $(id).hidden = false;
 }
 function fillSettings(){
   const f = $('settingsForm');
@@ -353,13 +390,12 @@ $('passwordForm').addEventListener('submit', async (e) => {
   } catch (err) { showMsg(err.message, true); }
 });
 $('addGroupBtn').addEventListener('click', () => {
-  hideForms();
   editing = {mode:'create'};
   const f = $('groupForm');
-  f.hidden = false;
   $('groupFormTitle').textContent = '添加分组';
   f.name.value = '';
   f.manualRefresh.checked = false;
+  openModal('groupModal');
   f.name.focus();
 });
 $('groupForm').addEventListener('submit', async (e) => {
@@ -457,6 +493,23 @@ $('toggleKey').addEventListener('click', () => {
 document.querySelectorAll('[data-close]').forEach(btn => {
   btn.addEventListener('click', () => { $(btn.dataset.close).hidden = true; });
 });
+document.querySelectorAll('.modal').forEach(modal => {
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) modal.hidden = true;
+  });
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  hideForms();
+});
+$('adminTabs').addEventListener('click', (e) => {
+  const tab = e.target.closest('.tab');
+  if (!tab) return;
+  const name = tab.dataset.tab;
+  $('adminTabs').querySelectorAll('.tab').forEach(btn => btn.classList.toggle('active', btn === tab));
+  $('panelSettings').hidden = name !== 'settings';
+  $('panelModels').hidden = name !== 'models';
+});
 $('groups').addEventListener('click', (e) => {
   const btn = e.target.closest('button');
   if (!btn) return;
@@ -469,43 +522,38 @@ $('groups').addEventListener('click', (e) => {
     hideForms();
     editing = {mode:'edit', original:g.name};
     const f = $('groupForm');
-    f.hidden = false;
     $('groupFormTitle').textContent = '编辑分组';
     f.name.value = g.name;
     f.manualRefresh.checked = !!g.manualRefresh;
-    f.scrollIntoView({block:'center'});
+    openModal('groupModal');
+    f.name.focus();
   } else if (act === 'del-group') {
     if (!confirm('删除分组「' + group + '」及其全部子组和模型？')) return;
     api('/api/admin/groups', {method:'DELETE', body:{name:group}}).then(() => reload('分组已删除。')).catch(err => showMsg(err.message, true));
   } else if (act === 'add-sub') {
-    hideForms();
     editing = {mode:'create', group};
     const f = $('subForm');
-    f.hidden = false;
     $('subFormTitle').textContent = '添加子组';
     f.name.value = '';
     f.kumaSlug.value = '';
-    f.scrollIntoView({block:'center'});
+    openModal('subModal');
     f.name.focus();
   } else if (act === 'edit-sub') {
     const sg = findSub(group, sub);
     if (!sg) return;
-    hideForms();
     editing = {mode:'edit', group, original:sg.name};
     const f = $('subForm');
-    f.hidden = false;
     $('subFormTitle').textContent = '编辑子组';
     f.name.value = sg.name;
     f.kumaSlug.value = sg.kumaSlug || '';
-    f.scrollIntoView({block:'center'});
+    openModal('subModal');
+    f.name.focus();
   } else if (act === 'del-sub') {
     if (!confirm('删除子组「' + sub + '」及其模型？')) return;
     api('/api/admin/subgroups', {method:'DELETE', body:{group, name:sub}}).then(() => reload('子组已删除。')).catch(err => showMsg(err.message, true));
   } else if (act === 'add-model') {
-    hideForms();
     editing = {mode:'create', group, sub};
     const f = $('modelForm');
-    f.hidden = false;
     $('modelFormTitle').textContent = '添加模型';
     $('keyHint').hidden = true;
     resetModelSelect('');
@@ -515,16 +563,14 @@ $('groups').addEventListener('click', (e) => {
     f.key.type = 'password';
     $('toggleKey').textContent = '显示';
     f.timeout.value = '30';
-    f.scrollIntoView({block:'center'});
+    openModal('modelModal');
     f.baseURL.focus();
   } else if (act === 'edit-model') {
     const sg = findSub(group, sub);
     const m = sg && (sg.models || [])[Number(btn.dataset.index)];
     if (!m) return;
-    hideForms();
     editing = {mode:'edit', group, sub, index:Number(btn.dataset.index)};
     const f = $('modelForm');
-    f.hidden = false;
     $('modelFormTitle').textContent = '编辑模型';
     $('keyHint').hidden = false;
     resetModelSelect(m.id || '');
@@ -534,7 +580,7 @@ $('groups').addEventListener('click', (e) => {
     f.key.type = 'password';
     $('toggleKey').textContent = '显示';
     f.timeout.value = String(m.timeout || 30);
-    f.scrollIntoView({block:'center'});
+    openModal('modelModal');
     loadModelOptions(m.id || '');
   } else if (act === 'del-model') {
     if (!confirm('删除这个模型？')) return;
