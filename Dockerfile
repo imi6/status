@@ -7,7 +7,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 
-COPY main.go admin.go ./
+COPY *.go ./
 
 ARG TARGETOS
 ARG TARGETARCH
@@ -16,7 +16,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
 
 FROM alpine:3.22
 
-RUN apk add --no-cache ca-certificates tzdata \
+RUN apk add --no-cache ca-certificates tzdata font-wqy-zenhei \
     && mkdir -p /data /opt/status
 
 COPY --from=build /out/status /usr/local/bin/status

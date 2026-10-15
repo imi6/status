@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -1571,8 +1572,15 @@ func refresh() {
 		resetTelegramQueue()
 		markTelegramPushed(nowPush)
 	} else if takeTelegram(prevRows, prevOverall, sections, overallStatus, overallLabel, tgEvery, nowPush) != "" {
-		texts := splitTelegram(formatStatusBoard(tgTitle, sections, nowPush, tgStatus, tgWebsite, tgChannel))
-		if err := sendTelegramAll(tgToken, tgChats, texts); err != nil {
+		caption := boardFooter(tgStatus, tgWebsite, tgChannel)
+		images, imgErr := renderStatusBoard(tgTitle, sections, nowPush)
+		if imgErr != nil {
+			log.Println("telegram image:", imgErr)
+			texts := splitTelegram(formatStatusBoard(tgTitle, sections, nowPush, tgStatus, tgWebsite, tgChannel))
+			if err := sendTelegramAll(tgToken, tgChats, texts); err != nil {
+				log.Println("telegram:", err)
+			}
+		} else if err := sendTelegramPhotos(tgToken, tgChats, images, caption); err != nil {
 			log.Println("telegram:", err)
 		}
 	}
@@ -1961,7 +1969,7 @@ func splitTelegram(text string) []string {
 
 var (
 	telegramAPI    = "https://api.telegram.org"
-	telegramClient = &http.Client{Timeout: 12 * time.Second}
+	telegramClient = &http.Client{Timeout: 25 * time.Second}
 )
 
 func sendTelegramAll(token string, chats []string, texts []string) error {
@@ -2015,6 +2023,82 @@ func sendTelegram(token, chatID, text string) error {
 		Description string `json:"description"`
 	}
 	_ = json.Unmarshal(body, &parsed)
+	if resp.StatusCode == http.StatusOK && parsed.OK {
+		return nil
+	}
+	msg := strings.TrimSpace(parsed.Description)
+	if msg == "" {
+		msg = "推送失败"
+	}
+	if len(msg) > 200 {
+		msg = msg[:200]
+	}
+	return errors.New(msg)
+}
+
+func sendTelegramPhotos(token string, chats []string, images [][]byte, caption string) error {
+	var failed []string
+	for _, chat := range chats {
+		for i, img := range images {
+			text := ""
+			if i == 0 {
+				text = caption
+			}
+			if err := sendTelegramPhoto(token, chat, img, text); err != nil {
+				failed = append(failed, chat+"："+err.Error())
+				break
+			}
+		}
+	}
+	if len(failed) == 0 {
+		return nil
+	}
+	msg := strings.Join(failed, "；")
+	if len([]rune(msg)) > 300 {
+		msg = string([]rune(msg)[:300])
+	}
+	return errors.New(msg)
+}
+
+func sendTelegramPhoto(token, chatID string, png []byte, caption string) error {
+	token = strings.TrimSpace(token)
+	chatID = strings.TrimSpace(chatID)
+	caption = strings.TrimSpace(caption)
+	if token == "" || chatID == "" || len(png) == 0 {
+		return nil
+	}
+	var body bytes.Buffer
+	w := multipart.NewWriter(&body)
+	_ = w.WriteField("chat_id", chatID)
+	if caption != "" {
+		_ = w.WriteField("caption", caption)
+	}
+	part, err := w.CreateFormFile("photo", "status.png")
+	if err != nil {
+		return errors.New("无法编码 Telegram 图片")
+	}
+	if _, err := part.Write(png); err != nil {
+		return errors.New("无法编码 Telegram 图片")
+	}
+	if err := w.Close(); err != nil {
+		return errors.New("无法编码 Telegram 图片")
+	}
+	req, err := http.NewRequest(http.MethodPost, telegramAPI+"/bot"+token+"/sendPhoto", &body)
+	if err != nil {
+		return errors.New("无法创建 Telegram 请求")
+	}
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	resp, err := telegramClient.Do(req)
+	if err != nil {
+		return errors.New("无法连接 Telegram")
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	var parsed struct {
+		OK          bool   `json:"ok"`
+		Description string `json:"description"`
+	}
+	_ = json.Unmarshal(respBody, &parsed)
 	if resp.StatusCode == http.StatusOK && parsed.OK {
 		return nil
 	}
