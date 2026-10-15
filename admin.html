@@ -5,65 +5,94 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>管理后台</title>
 <style>
-*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#f4f6fb;
+  --panel:#fff;
+  --panel-2:#f7f9fc;
+  --border:#dde3ee;
+  --border-soft:#e8ecf4;
+  --text:#1a2233;
+  --dim:#5c6880;
+  --faint:#8a95ab;
+  --accent:#6366f1;
+  --accent-2:#8b5cf6;
+  --ok:#15803d;
+  --down:#dc2626;
+  --down-soft:rgba(220,38,38,.1);
+  --radius:14px;
+  --shadow:0 8px 30px rgba(23,43,77,.08);
+  --font:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",Roboto,Helvetica,Arial,sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:14px;line-height:1.55}
 body{
-  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
-  background:#0a0a0a;
-  color:#111;
   min-height:100vh;
-  padding:28px 16px 48px;
+  background:
+    radial-gradient(1100px 500px at 15% -10%,rgba(99,102,241,.12),transparent 60%),
+    radial-gradient(900px 450px at 100% 0,rgba(139,92,246,.1),transparent 55%),
+    var(--bg);
 }
-.wrap{max-width:980px;margin:0 auto;background:#fff;border:4px solid #000;padding:28px 22px 36px}
-h1{font-size:28px;letter-spacing:2px;font-weight:800}
-.lead{margin-top:8px;color:#444;font-family:"Courier New",Consolas,monospace;font-size:13px}
-.top{display:flex;justify-content:space-between;gap:16px;align-items:flex-end;border-bottom:4px solid #000;padding-bottom:16px;margin-bottom:18px}
-.links{display:flex;gap:8px;flex-wrap:wrap}
+.wrap{max-width:980px;margin:0 auto;padding:28px 20px 48px}
+h1{font-size:22px;font-weight:680}
+.lead{margin-top:4px;color:var(--dim);font-size:13px}
+.top{display:flex;justify-content:space-between;gap:16px;align-items:flex-end;margin-bottom:8px}
+.links{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 a.btn,button{
-  font-family:"Courier New",Consolas,monospace;
-  font-size:12px;font-weight:800;letter-spacing:.5px;
-  background:#32f08c;color:#000;border:2px solid #000;
-  padding:6px 12px;cursor:pointer;text-decoration:none;display:inline-block;
+  font:inherit;font-weight:650;font-size:13px;
+  background:linear-gradient(135deg,var(--accent),var(--accent-2));color:#fff;
+  border:1px solid transparent;border-radius:8px;
+  padding:7px 14px;cursor:pointer;text-decoration:none;display:inline-block;
 }
-button.ghost,a.ghost{background:#fff}
-button.warn{background:#e74c3c;color:#fff}
-button:disabled{background:#ccc;color:#666;cursor:not-allowed}
-.msg{margin:12px 0;padding:10px 12px;border:2px solid #000;font-family:"Courier New",Consolas,monospace;font-size:13px;background:#f6fff9}
-.msg.err{background:#fff1f0}
-.card{border:3px solid #000;padding:14px;margin-top:14px}
-.card h2{font-size:15px;font-family:"Courier New",Consolas,monospace;text-transform:uppercase;margin-bottom:12px}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px 14px}
-label{display:flex;flex-direction:column;gap:6px;font-size:12px;font-weight:800;font-family:"Courier New",Consolas,monospace}
+button.ghost,a.ghost{background:var(--panel);color:var(--text);border-color:var(--border)}
+button.ghost:hover,a.ghost:hover{border-color:var(--accent)}
+button.warn{background:var(--down-soft);color:var(--down);border-color:rgba(220,38,38,.28)}
+button:disabled{background:#e8ecf4;color:var(--faint);cursor:not-allowed}
+.msg{margin:12px 0;padding:10px 12px;border:1px solid rgba(21,128,61,.28);border-radius:10px;font-size:13px;background:rgba(21,128,61,.08);color:var(--ok)}
+.msg.err{background:var(--down-soft);border-color:rgba(220,38,38,.28);color:var(--down)}
+.card{
+  border:1px solid var(--border);border-radius:var(--radius);background:linear-gradient(180deg,var(--panel),#eef1f7);
+  box-shadow:var(--shadow);padding:18px;margin-top:16px;
+}
+.card h2{font-size:15px;font-weight:680;margin-bottom:14px}
+.card .card{background:var(--panel);box-shadow:none;margin-top:14px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px 14px}
+label{display:flex;flex-direction:column;gap:6px;font-size:12px;font-weight:650;color:var(--dim)}
 label.wide{grid-column:1 / -1}
 input,select,textarea{
-  font:14px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-  border:2px solid #000;padding:8px 10px;background:#fff;width:100%;
+  font:14px/1.4 var(--font);color:var(--text);
+  border:1px solid var(--border);border-radius:8px;padding:8px 10px;background:#fff;width:100%;
 }
+input:focus,select:focus,textarea:focus{outline:2px solid rgba(99,102,241,.25);border-color:var(--accent)}
 textarea{min-height:72px;resize:vertical}
-.row-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;align-items:center}
-.hint{color:#555;font-size:12px;font-family:"Courier New",Consolas,monospace;margin-top:8px}
-.check{flex-direction:row;align-items:center;gap:8px}
+.row-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;align-items:center}
+.hint{color:var(--faint);font-size:12px;margin-top:8px}
+.check{flex-direction:row;align-items:center;gap:8px;color:var(--text)}
 .check input{width:auto}
-.group{border-top:3px solid #000;padding-top:14px;margin-top:14px}
-.group-head,.sub-head,.model{
-  display:flex;justify-content:space-between;gap:12px;align-items:flex-start;
+.group{
+  margin-top:14px;padding:16px 18px;border:1px solid var(--border);border-radius:12px;background:var(--panel);
 }
-.group-head h3{font-size:18px}
-.subgroup{margin-top:12px;padding:12px;background:#f7f7f7;border:2px solid #000}
-.sub-head h4{font-size:15px}
-.meta{color:#555;font-size:12px;font-family:"Courier New",Consolas,monospace;margin-top:4px}
-.model{border-top:1px solid #ccc;padding:10px 0;align-items:center}
+.group-head,.sub-head,.model{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}
+.group-head h3{font-size:16px;font-weight:680}
+.subgroup{margin-top:12px;padding:12px 14px;background:var(--panel-2);border:1px solid var(--border-soft);border-radius:10px}
+.sub-head h4{font-size:14px;font-weight:650}
+.meta{color:var(--faint);font-size:12px;margin-top:2px}
+.model{border-top:1px solid var(--border-soft);padding:10px 0;align-items:center}
 .model:first-of-type{border-top:0}
-.model b{display:block}
-.model span{color:#444;font-size:12px;font-family:"Courier New",Consolas,monospace}
-.login{max-width:420px;margin:40px auto}
+.model b{display:block;font-weight:650}
+.model span{color:var(--dim);font-size:12px}
+.login{max-width:420px;margin:48px auto}
+#login,#disabled{
+  background:linear-gradient(180deg,var(--panel),#eef1f7);
+  border:1px solid var(--border);border-radius:var(--radius);
+  box-shadow:var(--shadow);padding:28px 24px;
+}
 .keyline{display:flex;gap:8px;align-items:center}
 .keyline input,.keyline select{flex:1;min-width:0}
-.empty{color:#555;font-family:"Courier New",Consolas,monospace;padding:8px 0}
+.empty{color:var(--faint);padding:8px 0}
 @media(max-width:720px){
   .grid{grid-template-columns:1fr}
   .top,.group-head,.sub-head,.model{flex-direction:column}
-  .wrap{padding:18px 14px 28px}
-  h1{font-size:22px}
+  .wrap{padding:18px 14px 36px}
 }
 </style>
 </head>
@@ -89,7 +118,7 @@ textarea{min-height:72px;resize:vertical}
     <div class="top">
       <div>
         <h1>管理后台</h1>
-        <p class="lead">添加和修改模型地址、密钥。分组保存在数据库，保存后下一轮检测生效。</p>
+        <p class="lead">分组名称显示在状态页卡片上，子组显示在副标题。保存模型后会立刻用密钥、地址和所选模型探针一次。</p>
       </div>
       <div class="links">
         <a class="btn ghost" href="/">状态页</a>
@@ -151,7 +180,7 @@ textarea{min-height:72px;resize:vertical}
           <label>子组名称<input name="name" required></label>
           <label>Kuma slug<input name="kumaSlug" spellcheck="false"></label>
         </div>
-        <p class="hint">子组名称会显示在状态页上。</p>
+        <p class="hint">状态页卡片标题是分组名称，副标题是子组名称。探针使用所选模型，不在卡片标题上显示模型名。</p>
         <div class="row-actions">
           <button type="submit">保存</button>
           <button type="button" class="ghost" data-close="subForm">取消</button>
