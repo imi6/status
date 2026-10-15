@@ -423,24 +423,63 @@ func TestReorderSubGroups(t *testing.T) {
 	}
 }
 
+func TestSubGroupRatioRoundTrip(t *testing.T) {
+	if got, err := cleanRatio("  1.5 "); err != nil || got != "1.5" {
+		t.Fatalf("%q %v", got, err)
+	}
+	if got, err := cleanRatio(""); err != nil || got != "" {
+		t.Fatalf("%q %v", got, err)
+	}
+	if _, err := cleanRatio(strings.Repeat("倍", 17)); err == nil {
+		t.Fatal("expected long ratio error")
+	}
+	oldDB := db
+	opened, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "ratio.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db = opened
+	t.Cleanup(func() {
+		opened.Close()
+		db = oldDB
+	})
+	if err := ensureSchema(); err != nil {
+		t.Fatal(err)
+	}
+	groups := []Group{{Name: "GPT", SubGroups: []SubGroup{
+		{Name: "Plus", Ratio: "1.5", Models: []Model{{ID: "gpt", Provider: "openai-compat", Timeout: 30}}},
+		{Name: "Pro"},
+	}}}
+	if err := saveMonitorGroups(groups); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := loadMonitorGroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded[0].SubGroups[0].Ratio != "1.5" || loaded[0].SubGroups[1].Ratio != "" {
+		t.Fatalf("%+v", loaded[0].SubGroups)
+	}
+}
+
 func TestCopySubGroup(t *testing.T) {
 	c := Config{Groups: []Group{{Name: "Claude", SubGroups: []SubGroup{{
 		Name:     "Claude Max",
 		KumaSlug: "claude",
 		Models:   []Model{{ID: "claude-haiku", Provider: "anthropic", BaseURL: "https://www.zzshu.cc/v1", Key: "sk", Timeout: 60}},
 	}}}}}
-	if err := copySubGroup(&c, "Claude", "Claude Max", "Claude Max 副本", ""); err != nil {
+	if err := copySubGroup(&c, "Claude", "Claude Max", "Claude Max 副本", "", "1.5"); err != nil {
 		t.Fatal(err)
 	}
 	got := c.Groups[0].SubGroups
-	if len(got) != 2 || got[1].Name != "Claude Max 副本" || got[1].KumaSlug != "" || len(got[1].Models) != 1 || got[1].Models[0].Key != "sk" {
+	if len(got) != 2 || got[1].Name != "Claude Max 副本" || got[1].KumaSlug != "" || got[1].Ratio != "1.5" || len(got[1].Models) != 1 || got[1].Models[0].Key != "sk" {
 		t.Fatalf("%+v", got[1])
 	}
 	got[1].Models[0].Key = "changed"
 	if got[0].Models[0].Key != "sk" {
 		t.Fatal("source key changed")
 	}
-	if err := copySubGroup(&c, "Claude", "Claude Max", "Claude Max 副本", ""); err == nil {
+	if err := copySubGroup(&c, "Claude", "Claude Max", "Claude Max 副本", "", ""); err == nil {
 		t.Fatal("expected duplicate name")
 	}
 }

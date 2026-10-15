@@ -150,6 +150,88 @@ func TestClassifyProbeStatus(t *testing.T) {
 	check("out", "down", "异常")
 }
 
+func TestHydrateStatusShowsSavedGroups(t *testing.T) {
+	oldDB := db
+	oldCfg := cfg
+	mu.Lock()
+	oldStatus := statusV2
+	mu.Unlock()
+	opened, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "checks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db = opened
+	t.Cleanup(func() {
+		opened.Close()
+		db = oldDB
+		mu.Lock()
+		cfg = oldCfg
+		statusV2 = oldStatus
+		mu.Unlock()
+	})
+	if err := ensureSchema(); err != nil {
+		t.Fatal(err)
+	}
+	checked := time.Now().Add(-time.Minute)
+	if _, err := db.Exec(
+		`INSERT INTO checks (group_name, sub_name, model_id, up, latency, checked_at) VALUES (?,?,?,?,?,?)`,
+		"GPT", "GPT Pro", "gpt", 1, 1500, checked.Unix(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	cfg = Config{Frontend: FrontendConfig{Title: "监控"}, Groups: []Group{{
+		Name: "GPT",
+		SubGroups: []SubGroup{
+			{Name: "GPT Pro", Models: []Model{{ID: "gpt", Provider: "openai-compat"}}},
+			{Name: "GPT Plus", Models: []Model{{ID: "plus", Provider: "openai-compat"}}},
+		},
+	}}}
+	mu.Unlock()
+	hydrateStatus()
+	mu.RLock()
+	defer mu.RUnlock()
+	if len(statusV2.Sections) != 1 || len(statusV2.Sections[0].Rows) != 2 {
+		t.Fatalf("sections %+v", statusV2.Sections)
+	}
+	pro := statusV2.Sections[0].Rows[0]
+	if pro.SubName != "GPT Pro" || pro.Status != "up" || pro.LatencyMs != 1500 {
+		t.Fatalf("pro %+v", pro)
+	}
+	if statusV2.Sections[0].Rows[1].SubName != "GPT Plus" || statusV2.Sections[0].Rows[1].Status != "unknown" {
+		t.Fatalf("plus %+v", statusV2.Sections[0].Rows[1])
+	}
+}
+
+func TestApplyConfigOrder(t *testing.T) {
+	groups := []Group{
+		{Name: "GPT", SubGroups: []SubGroup{
+			{Name: "Plus", Models: []Model{{ID: "plus"}}},
+			{Name: "Pro", Models: []Model{{ID: "pro-a"}, {ID: "pro-b"}}},
+		}},
+		{Name: "GLM", SubGroups: []SubGroup{{Name: "GLM", Models: []Model{{ID: "glm"}}}}},
+		{Name: "国模聚合", SubGroups: []SubGroup{{Name: "聚合", Models: []Model{{ID: "mix"}}}}},
+	}
+	sections := []Section{
+		{Name: "国模聚合", Rows: []GroupResp{{Name: "mix", SubName: "聚合"}}},
+		{Name: "GPT", Rows: []GroupResp{
+			{Name: "pro-b", SubName: "Pro"},
+			{Name: "plus", SubName: "Plus"},
+			{Name: "pro-a", SubName: "Pro"},
+		}},
+		{Name: "GLM", Rows: []GroupResp{{Name: "glm", SubName: "GLM"}}},
+	}
+	got := applyConfigOrder(sections, groups)
+	names := []string{got[0].Name, got[1].Name, got[2].Name}
+	if names[0] != "GPT" || names[1] != "GLM" || names[2] != "国模聚合" {
+		t.Fatalf("groups %v", names)
+	}
+	rows := got[0].Rows
+	if rows[0].SubName != "Plus" || rows[1].Name != "pro-a" || rows[2].Name != "pro-b" {
+		t.Fatalf("rows %+v", rows)
+	}
+}
+
 func TestOverallFromRows(t *testing.T) {
 	row := func(status string) GroupResp { return GroupResp{Status: status} }
 	sec := func(rows ...GroupResp) Section { return Section{Rows: rows} }

@@ -96,6 +96,20 @@ func cleanName(name, what string) (string, error) {
 	return name, nil
 }
 
+func cleanRatio(v string) (string, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "", nil
+	}
+	if len([]rune(v)) > 16 {
+		return "", errors.New("倍率过长")
+	}
+	if strings.ContainsAny(v, "<>\r\n") {
+		return "", errors.New("倍率包含无效字符")
+	}
+	return v, nil
+}
+
 func findGroup(c *Config, name string) int {
 	for i := range c.Groups {
 		if c.Groups[i].Name == name {
@@ -176,7 +190,7 @@ func deleteGroup(c *Config, name string) error {
 	return nil
 }
 
-func addSubGroup(c *Config, group, name, slug string) error {
+func addSubGroup(c *Config, group, name, slug, ratio string) error {
 	gi := findGroup(c, strings.TrimSpace(group))
 	if gi < 0 {
 		return errors.New("分组不存在")
@@ -192,11 +206,15 @@ func addSubGroup(c *Config, group, name, slug string) error {
 	if strings.ContainsAny(slug, " \r\n") {
 		return errors.New("Kuma slug 不能包含空格")
 	}
-	c.Groups[gi].SubGroups = append(c.Groups[gi].SubGroups, SubGroup{Name: name, KumaSlug: slug, Models: []Model{}})
+	ratio, err = cleanRatio(ratio)
+	if err != nil {
+		return err
+	}
+	c.Groups[gi].SubGroups = append(c.Groups[gi].SubGroups, SubGroup{Name: name, KumaSlug: slug, Ratio: ratio, Models: []Model{}})
 	return nil
 }
 
-func updateSubGroup(c *Config, group, name, newName, slug string) error {
+func updateSubGroup(c *Config, group, name, newName, slug, ratio string) error {
 	gi := findGroup(c, strings.TrimSpace(group))
 	if gi < 0 {
 		return errors.New("分组不存在")
@@ -216,12 +234,17 @@ func updateSubGroup(c *Config, group, name, newName, slug string) error {
 	if strings.ContainsAny(slug, " \r\n") {
 		return errors.New("Kuma slug 不能包含空格")
 	}
+	ratio, err = cleanRatio(ratio)
+	if err != nil {
+		return err
+	}
 	c.Groups[gi].SubGroups[si].Name = newName
 	c.Groups[gi].SubGroups[si].KumaSlug = slug
+	c.Groups[gi].SubGroups[si].Ratio = ratio
 	return nil
 }
 
-func copySubGroup(c *Config, group, name, newName, slug string) error {
+func copySubGroup(c *Config, group, name, newName, slug, ratio string) error {
 	gi := findGroup(c, strings.TrimSpace(group))
 	if gi < 0 {
 		return errors.New("分组不存在")
@@ -241,10 +264,14 @@ func copySubGroup(c *Config, group, name, newName, slug string) error {
 	if strings.ContainsAny(slug, " \r\n") {
 		return errors.New("Kuma slug 不能包含空格")
 	}
+	ratio, err = cleanRatio(ratio)
+	if err != nil {
+		return err
+	}
 	src := c.Groups[gi].SubGroups[si]
 	models := make([]Model, len(src.Models))
 	copy(models, src.Models)
-	c.Groups[gi].SubGroups = append(c.Groups[gi].SubGroups, SubGroup{Name: newName, KumaSlug: slug, Models: models})
+	c.Groups[gi].SubGroups = append(c.Groups[gi].SubGroups, SubGroup{Name: newName, KumaSlug: slug, Ratio: ratio, Models: models})
 	return nil
 }
 
@@ -1059,6 +1086,7 @@ type subBody struct {
 	Name     string   `json:"name"`
 	NewName  string   `json:"newName"`
 	KumaSlug string   `json:"kumaSlug"`
+	Ratio    string   `json:"ratio"`
 	Copy     bool     `json:"copy"`
 	Order    []string `json:"order"`
 }
@@ -1072,9 +1100,9 @@ func adminSubGroups(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		err := updateConfig(func(c *Config) error {
 			if body.Copy {
-				return copySubGroup(c, body.Group, body.Name, body.NewName, body.KumaSlug)
+				return copySubGroup(c, body.Group, body.Name, body.NewName, body.KumaSlug, body.Ratio)
 			}
-			return addSubGroup(c, body.Group, body.Name, body.KumaSlug)
+			return addSubGroup(c, body.Group, body.Name, body.KumaSlug, body.Ratio)
 		})
 		finishChange(w, err, true)
 	case http.MethodPut:
@@ -1083,7 +1111,7 @@ func adminSubGroups(w http.ResponseWriter, r *http.Request) {
 			newName = body.Name
 		}
 		err := updateConfig(func(c *Config) error {
-			return updateSubGroup(c, body.Group, body.Name, newName, body.KumaSlug)
+			return updateSubGroup(c, body.Group, body.Name, newName, body.KumaSlug, body.Ratio)
 		})
 		if err == nil {
 			renameSubHistory(strings.TrimSpace(body.Group), strings.TrimSpace(body.Name), strings.TrimSpace(newName))

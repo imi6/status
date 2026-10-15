@@ -62,6 +62,7 @@ type Group struct {
 type SubGroup struct {
 	Name     string  `json:"name"`
 	KumaSlug string  `json:"kumaSlug"`
+	Ratio    string  `json:"ratio,omitempty"` // 展示倍率，留空则状态页不显示
 	Models   []Model `json:"models"`
 }
 
@@ -81,6 +82,7 @@ type OverallStatus struct {
 type GroupResp struct {
 	Name          string                      `json:"name"`
 	SubName       string                      `json:"sub_name"`
+	Ratio         string                      `json:"ratio,omitempty"`
 	Family        string                      `json:"family"`
 	Status        string                      `json:"status"`
 	Label         string                      `json:"label"`
@@ -130,6 +132,7 @@ var (
 	checking          bool
 	lastManualRefresh time.Time
 	manualRefreshMu   sync.RWMutex
+	telegramBaselined bool
 )
 
 var configPath = "config.json"
@@ -263,6 +266,33 @@ func ensureSchema() error {
 			v TEXT NOT NULL
 		);
 	`)
+	if err != nil {
+		return err
+	}
+	return ensureSubgroupRatio()
+}
+
+func ensureSubgroupRatio() error {
+	rows, err := db.Query(`PRAGMA table_info(monitor_subgroups)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, typ string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == "ratio" {
+			return rows.Err()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.Exec(`ALTER TABLE monitor_subgroups ADD COLUMN ratio TEXT NOT NULL DEFAULT ''`)
 	return err
 }
 
@@ -304,7 +334,7 @@ func loadMonitorGroups() ([]Group, error) {
 }
 
 func loadMonitorSubgroups(groupID int) ([]SubGroup, error) {
-	rows, err := db.Query(`SELECT id, name, kuma_slug FROM monitor_subgroups WHERE group_id = ? ORDER BY sort_order, id`, groupID)
+	rows, err := db.Query(`SELECT id, name, kuma_slug, ratio FROM monitor_subgroups WHERE group_id = ? ORDER BY sort_order, id`, groupID)
 	if err != nil {
 		return nil, err
 	}
@@ -312,15 +342,15 @@ func loadMonitorSubgroups(groupID int) ([]SubGroup, error) {
 	var subs []SubGroup
 	for rows.Next() {
 		var id int
-		var name, slug string
-		if err := rows.Scan(&id, &name, &slug); err != nil {
+		var name, slug, ratio string
+		if err := rows.Scan(&id, &name, &slug, &ratio); err != nil {
 			return nil, err
 		}
 		models, err := loadMonitorModels(id)
 		if err != nil {
 			return nil, err
 		}
-		subs = append(subs, SubGroup{Name: name, KumaSlug: slug, Models: models})
+		subs = append(subs, SubGroup{Name: name, KumaSlug: slug, Ratio: strings.TrimSpace(ratio), Models: models})
 	}
 	if subs == nil {
 		subs = []SubGroup{}
@@ -380,7 +410,7 @@ func saveMonitorGroups(groups []Group) error {
 			return err
 		}
 		for j, sg := range g.SubGroups {
-			res, err = tx.Exec(`INSERT INTO monitor_subgroups (group_id, name, kuma_slug, sort_order) VALUES (?, ?, ?, ?)`, gid, sg.Name, sg.KumaSlug, j)
+			res, err = tx.Exec(`INSERT INTO monitor_subgroups (group_id, name, kuma_slug, ratio, sort_order) VALUES (?, ?, ?, ?, ?)`, gid, sg.Name, sg.KumaSlug, strings.TrimSpace(sg.Ratio), j)
 			if err != nil {
 				return err
 			}
@@ -995,29 +1025,70 @@ func providerFamily(p string) string {
 	}
 }
 
+func snapshotRow(gName string, sg SubGroup, m Model, lat int, lastAt, now time.Time) GroupResp {
+	statusStr, label := classifyProbeStatus(gName, sg.Name, m.ID, now)
+	row := GroupResp{
+		Name:        m.ID,
+		SubName:     sg.Name,
+		Ratio:       strings.TrimSpace(sg.Ratio),
+		Family:      providerFamily(m.Provider),
+		Status:      statusStr,
+		Label:       label,
+		HealthScore: calcHealthScore(gName, sg.Name, m.ID),
+		LatencyMs:   lat,
+		History:     getHistory(gName, sg.Name, m.ID, 120),
+		Timelines:   buildTimelines(gName, sg.Name, m.ID, now),
+	}
+	if !lastAt.IsZero() {
+		row.LastCheckedAt = &lastAt
+	}
+	return row
+}
+
+// hydrateStatus 启动后立刻用已有检测记录画出分组，不必等新一轮探测结束。
+func hydrateStatus() {
+	if db == nil {
+		return
+	}
+	mu.RLock()
+	groups := append([]Group(nil), cfg.Groups...)
+	title := cfg.Frontend.Title
+	mu.RUnlock()
+	now := time.Now()
+	sections := make([]Section, 0, len(groups))
+	for _, g := range groups {
+		var rows []GroupResp
+		for _, sg := range g.SubGroups {
+			for _, m := range sg.Models {
+				_, lat, lastAt := getLastCheck(g.Name, sg.Name, m.ID)
+				rows = append(rows, snapshotRow(g.Name, sg, m, lat, lastAt, now))
+			}
+		}
+		if len(rows) > 0 {
+			sections = append(sections, Section{Name: g.Name, Rows: rows})
+		}
+	}
+	sections = applyConfigOrder(sections, groups)
+	overallStatus, overallLabel := overallFromRows(sections)
+	mu.Lock()
+	statusV2 = StatusRespV2{
+		Title:    title,
+		Overall:  OverallStatus{Status: overallStatus, Label: overallLabel},
+		Checking: false,
+		Sections: sections,
+	}
+	mu.Unlock()
+}
+
 // updateRow 检测完一个模型后立即更新共享状态，前端轮询可见
 func updateRow(gName string, sg SubGroup, m Model, sections *[]Section, up bool, lat int) {
 	_ = up
-	hist := getHistory(gName, sg.Name, m.ID, 120)
-	score := calcHealthScore(gName, sg.Name, m.ID)
 	_, _, lastAt := getLastCheck(gName, sg.Name, m.ID)
-	statusStr, label := classifyProbeStatus(gName, sg.Name, m.ID, time.Now())
-
-	row := GroupResp{
-		Name:          m.ID,
-		SubName:       sg.Name,
-		Family:        providerFamily(m.Provider),
-		Status:        statusStr,
-		Label:         label,
-		HealthScore:   score,
-		LatencyMs:     lat,
-		LastCheckedAt: &lastAt,
-		History:       hist,
-		Timelines:     buildTimelines(gName, sg.Name, m.ID, time.Now()),
-	}
+	row := snapshotRow(gName, sg, m, lat, lastAt, time.Now())
 
 	mu.Lock()
 	*sections = upsertSectionRow(*sections, gName, row)
+	*sections = applyConfigOrder(*sections, cfg.Groups)
 
 	overallStatus, overallLabel := overallFromRows(*sections)
 
@@ -1050,6 +1121,52 @@ func upsertSectionRow(sections []Section, gName string, row GroupResp) []Section
 		}
 	}
 	sec.Rows = append(sec.Rows, row)
+	return sections
+}
+
+// applyConfigOrder 让状态页分组、子组和模型顺序跟后台保存的顺序一致。
+func applyConfigOrder(sections []Section, groups []Group) []Section {
+	groupIndex := make(map[string]int, len(groups))
+	type rank struct{ sub, model int }
+	rowIndex := make(map[string]rank)
+	for i, g := range groups {
+		groupIndex[g.Name] = i
+		for j, sg := range g.SubGroups {
+			for k, m := range sg.Models {
+				rowIndex[g.Name+"\x1f"+sg.Name+"\x1f"+m.ID] = rank{j, k}
+			}
+		}
+	}
+	sort.SliceStable(sections, func(a, b int) bool {
+		ia, oka := groupIndex[sections[a].Name]
+		ib, okb := groupIndex[sections[b].Name]
+		if !oka {
+			ia = len(groups)
+		}
+		if !okb {
+			ib = len(groups)
+		}
+		return ia < ib
+	})
+	for i := range sections {
+		rows := sections[i].Rows
+		gName := sections[i].Name
+		sort.SliceStable(rows, func(a, b int) bool {
+			ka, oka := rowIndex[gName+"\x1f"+rows[a].SubName+"\x1f"+rows[a].Name]
+			kb, okb := rowIndex[gName+"\x1f"+rows[b].SubName+"\x1f"+rows[b].Name]
+			if !oka {
+				ka = rank{len(groups) + 1, len(groups) + 1}
+			}
+			if !okb {
+				kb = rank{len(groups) + 1, len(groups) + 1}
+			}
+			if ka.sub != kb.sub {
+				return ka.sub < kb.sub
+			}
+			return ka.model < kb.model
+		})
+		sections[i].Rows = rows
+	}
 	return sections
 }
 
@@ -1160,8 +1277,12 @@ func refresh() {
 	}
 	mu.RUnlock()
 
-	// 根据 config 清理已不存在的条目
+	// 根据 config 清理已不存在的条目，并立刻按后台顺序发布
 	sections = pruneStaleSections(sections, cfg)
+	mu.Lock()
+	sections = applyConfigOrder(sections, cfg.Groups)
+	statusV2.Sections = sections
+	mu.Unlock()
 
 	now := time.Now()
 	totalLat := 0
@@ -1169,9 +1290,9 @@ func refresh() {
 
 	// failRecords 记录首次失败的模型，等全部测完再统一重试
 	type failRecord struct {
-		gName, sgName string
-		m             Model
-		lat           int
+		gName, sgName, ratio string
+		m                    Model
+		lat                  int
 	}
 	var failRecords []failRecord
 
@@ -1186,7 +1307,7 @@ func refresh() {
 					latCount++
 					updateRow(g.Name, sg, m, &sections, true, lat)
 				} else {
-					failRecords = append(failRecords, failRecord{gName: g.Name, sgName: sg.Name, m: m, lat: lat})
+					failRecords = append(failRecords, failRecord{gName: g.Name, sgName: sg.Name, ratio: sg.Ratio, m: m, lat: lat})
 				}
 			}
 		}
@@ -1202,14 +1323,14 @@ func refresh() {
 				totalLat += lat
 				latCount++
 			}
-			updateRow(fr.gName, SubGroup{Name: fr.sgName}, fr.m, &sections, up, lat)
+			updateRow(fr.gName, SubGroup{Name: fr.sgName, Ratio: fr.ratio}, fr.m, &sections, up, lat)
 		}
 	}
 
 	// 全部检测完毕，标记 checking = false
-	overallStatus, overallLabel := overallFromRows(sections)
-
 	mu.Lock()
+	sections = applyConfigOrder(sections, cfg.Groups)
+	overallStatus, overallLabel := overallFromRows(sections)
 	statusV2 = StatusRespV2{
 		Title:           cfg.Frontend.Title,
 		Overall:         OverallStatus{Status: overallStatus, Label: overallLabel},
@@ -1272,7 +1393,10 @@ func refresh() {
 	mu.RLock()
 	tgToken, tgChat := cfg.Telegram.BotToken, cfg.Telegram.ChatID
 	mu.RUnlock()
-	if text := telegramDigest(prevRows, prevOverall, sections, overallStatus, overallLabel); text != "" {
+	// 启动时已经用历史记录填过状态，第一轮探测只当基线，不推送。
+	if !telegramBaselined {
+		telegramBaselined = true
+	} else if text := telegramDigest(prevRows, prevOverall, sections, overallStatus, overallLabel); text != "" {
 		if err := sendTelegram(tgToken, tgChat, text); err != nil {
 			log.Println("telegram:", err)
 		}
@@ -1936,6 +2060,7 @@ func main() {
 	loadConfig()
 	initDB()
 	migrateGroups()
+	hydrateStatus()
 
 	go func() {
 		refresh()

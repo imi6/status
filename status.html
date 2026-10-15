@@ -97,7 +97,9 @@ body{min-height:100vh;background:var(--bg)}
 }
 .card-head{display:flex;align-items:center;gap:10px;padding:14px 14px 12px}
 .card-title{min-width:0;flex:1}
-.card-title strong{display:block;font-size:15.5px;font-weight:640;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.name-row{display:flex;align-items:center;gap:8px;min-width:0}
+.card-title strong{display:block;min-width:0;font-size:15.5px;font-weight:640;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ratio{flex:none;font-style:normal;font-size:12px;font-weight:650;color:var(--dim);background:var(--panel-2);border:1px solid var(--border);border-radius:20px;padding:2px 8px;white-space:nowrap}
 .card-title span{display:block;margin-top:2px;color:var(--faint);font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .stat{text-align:right;font-variant-numeric:tabular-nums}
 .stat .k{display:block;font-size:11px;color:var(--faint);letter-spacing:.3px}
@@ -236,6 +238,12 @@ function elapsed(v){if(!v)return'';const ms=Date.now()-new Date(v).getTime();if(
 function escapeHtml(t){return String(t).replace(/[&<>'"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]))}
 function pct(v){return Number.isFinite(Number(v))?Number(v).toFixed(1)+'%':'--'}
 function scoreValue(g){return Number.isFinite(Number(g.health_score))?Number(g.health_score):Number(g.uptime||0)}
+function ratioLabel(v){
+  const s=String(v||'').trim();
+  if(!s)return '';
+  if(/^\d+(?:\.\d+)?$/.test(s))return s+' 倍';
+  return s;
+}
 
 const GRAN_LABEL={hour:'近 24 小时',day:'近 30 天',week:'近 12 周'};
 const PERIOD_LABEL={hour:'本小时',day:'今日',week:'本周'};
@@ -419,12 +427,14 @@ function render(data){
       const latency=g.latency_ms?(g.latency_ms/1000).toFixed(2)+'s':'无延迟样本';
       const groupName=sec.name||g.sub_name||'';
       const cardTitle=g.sub_name||groupName;
+      const ratioText=ratioLabel(g.ratio);
+      const ratioHtml=ratioText?'<em class="ratio">'+escapeHtml(ratioText)+'</em>':'';
       const curRate=cur.rate==null?'--':cur.rate.toFixed(1)+'%';
       const rate=win.rate==null?'--':win.rate.toFixed(1)+'%';
       const winLat=win.samples?(win.latency/1000).toFixed(2)+'s':'--';
       const key=groupName+'|'+(g.sub_name||'')+'|'+(g.name||'');
       const axis=buckets.length?'<div class="time-row"><span>'+fmtAxis(buckets[0].start*1000)+'</span><span>'+fmtAxis(buckets[Math.floor(buckets.length/2)].start*1000)+'</span><span>'+fmtAxis(buckets[buckets.length-1].end*1000)+'</span></div>':'';
-      output+='<article class="card" data-key="'+escapeHtml(key)+'"><div class="card-head"><span class="big-dot '+status+'"></span><div class="card-title"><strong title="'+escapeHtml(cardTitle)+'">'+escapeHtml(cardTitle)+'</strong><span>'+(g.label||'采样中')+' · '+latency+'</span></div><div class="stat"><span class="k">'+(PERIOD_LABEL[_gran]||'当前')+'</span><span class="v">'+curRate+'</span></div><span class="badge '+status+'">'+(g.label||'采样中')+'</span>'+refreshBtn+'</div><div class="card-body"><div class="track">'+timelineHtml(buckets)+'</div>'+axis+'</div></article>';
+      output+='<article class="card" data-key="'+escapeHtml(key)+'"><div class="card-head"><span class="big-dot '+status+'"></span><div class="card-title"><div class="name-row"><strong title="'+escapeHtml(cardTitle)+'">'+escapeHtml(cardTitle)+'</strong>'+ratioHtml+'</div><span>'+(g.label||'采样中')+' · '+latency+'</span></div><div class="stat"><span class="k">'+(PERIOD_LABEL[_gran]||'当前')+'</span><span class="v">'+curRate+'</span></div><span class="badge '+status+'">'+(g.label||'采样中')+'</span>'+refreshBtn+'</div><div class="card-body"><div class="track">'+timelineHtml(buckets)+'</div>'+axis+'</div></article>';
     }
   }
   document.getElementById('app').innerHTML=output;
@@ -457,7 +467,9 @@ function paintDetail(){
   const latency=g.latency_ms?(g.latency_ms/1000).toFixed(2)+'s':'无延迟样本';
   document.getElementById('detailTitle').textContent=g.sub_name||found.groupName;
   document.getElementById('detailSub').textContent=(g.label||'采样中')+' · '+latency;
+  const ratio=ratioLabel(g.ratio);
   document.getElementById('detailGrid').innerHTML=
+    (ratio?'<div><span>倍率</span><b>'+escapeHtml(ratio)+'</b></div>':'')+
     '<div><span>'+GRAN_LABEL[_gran]+'采样</span><b>'+win.samples+'</b></div>'+
     '<div><span>成功率</span><b>'+rate+'</b></div>'+
     '<div><span>平均延迟</span><b>'+winLat+'</b></div>'+

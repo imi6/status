@@ -221,10 +221,11 @@ button.drag:active{cursor:grabbing}
     <h2 id="subFormTitle">添加子组</h2>
     <div class="grid">
       <label>子组名称<input name="name" required></label>
-      <label>Kuma slug<input name="kumaSlug" spellcheck="false"></label>
+      <label>倍率<input name="ratio" maxlength="16" spellcheck="false" placeholder="1.5，留空不展示"></label>
+      <label class="wide">Kuma slug<input name="kumaSlug" spellcheck="false"></label>
     </div>
     <p class="hint" id="subCopyHint" hidden>会复制该子组下的全部模型和密钥。Kuma slug 留空则不共用原来的监控项。</p>
-    <p class="hint">状态页卡片标题是子组名称，分组名只出现在顶部分组切换里。探针使用所选模型，不在卡片标题上显示模型名。</p>
+    <p class="hint">状态页卡片标题是子组名称，分组名只出现在顶部分组切换里。倍率显示在卡片标题旁边，留空则不展示。探针使用所选模型，不在卡片标题上显示模型名。</p>
     <div class="row-actions">
       <button type="submit">保存</button>
       <button type="button" class="ghost" data-close="subModal">取消</button>
@@ -356,7 +357,11 @@ function render(){
       const modelHtml = models.length ? models.map((m, mi) => (
         '<div class="model"><div><b>' + escapeHtml(m.id) + '</b><span>' + escapeHtml(providerLabel(m.provider)) + ' · ' + escapeHtml(m.baseURL || '') + ' · ' + escapeHtml(maskKey(m.key)) + ' · ' + (m.timeout || 30) + 's</span></div><div class="links"><button type="button" data-act="edit-model" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '" data-index="' + mi + '">编辑</button> <button type="button" class="warn" data-act="del-model" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '" data-index="' + mi + '">删除</button></div></div>'
       )).join('') : '<p class="empty">此子组还没有模型。</p>';
-      return '<div class="subgroup" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '"><div class="sub-head"><div class="sub-title"><button type="button" class="drag" title="拖动排序" aria-label="拖动排序">⋮⋮</button><div><h4>' + escapeHtml(sg.name) + '</h4><div class="meta">' + (sg.kumaSlug ? ('Kuma ' + escapeHtml(sg.kumaSlug)) : '未设置独立 Kuma') + '</div></div></div><div class="links"><button type="button" data-act="add-model" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '">添加模型</button> <button type="button" data-act="edit-sub" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '">编辑</button> <button type="button" data-act="copy-sub" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '">复制</button> <button type="button" class="warn" data-act="del-sub" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '">删除</button></div></div>' + modelHtml + '</div>';
+      const ratioText = String(sg.ratio || '').trim();
+      const metaBits = [];
+      if (ratioText) metaBits.push('倍率 ' + escapeHtml(ratioText));
+      metaBits.push(sg.kumaSlug ? ('Kuma ' + escapeHtml(sg.kumaSlug)) : '未设置独立 Kuma');
+      return '<div class="subgroup" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '"><div class="sub-head"><div class="sub-title"><button type="button" class="drag" title="拖动排序" aria-label="拖动排序">⋮⋮</button><div><h4>' + escapeHtml(sg.name) + '</h4><div class="meta">' + metaBits.join(' · ') + '</div></div></div><div class="links"><button type="button" data-act="add-model" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '">添加模型</button> <button type="button" data-act="edit-sub" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '">编辑</button> <button type="button" data-act="copy-sub" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '">复制</button> <button type="button" class="warn" data-act="del-sub" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '">删除</button></div></div>' + modelHtml + '</div>';
     }).join('') : '<p class="empty">此分组还没有子组。</p>';
     return '<section class="group"><div class="group-head"><div><h3>' + escapeHtml(g.name) + '</h3><div class="meta">' + (g.manualRefresh ? '显示手动刷新' : '无手动刷新') + '</div></div><div class="links"><button type="button" data-act="add-sub" data-group="' + escapeHtml(g.name) + '">添加子组</button> <button type="button" data-act="edit-group" data-group="' + escapeHtml(g.name) + '">编辑</button> <button type="button" class="warn" data-act="del-group" data-group="' + escapeHtml(g.name) + '">删除</button></div></div>' + subHtml + '</section>';
   }).join('');
@@ -460,11 +465,11 @@ $('subForm').addEventListener('submit', async (e) => {
   const f = e.target;
   try {
     if (editing.mode === 'create') {
-      await api('/api/admin/subgroups', {method:'POST', body:{group:editing.group, name:f.name.value, kumaSlug:f.kumaSlug.value}});
+      await api('/api/admin/subgroups', {method:'POST', body:{group:editing.group, name:f.name.value, kumaSlug:f.kumaSlug.value, ratio:f.ratio.value}});
     } else if (editing.mode === 'copy') {
-      await api('/api/admin/subgroups', {method:'POST', body:{group:editing.group, name:editing.original, newName:f.name.value, kumaSlug:f.kumaSlug.value, copy:true}});
+      await api('/api/admin/subgroups', {method:'POST', body:{group:editing.group, name:editing.original, newName:f.name.value, kumaSlug:f.kumaSlug.value, ratio:f.ratio.value, copy:true}});
     } else {
-      await api('/api/admin/subgroups', {method:'PUT', body:{group:editing.group, name:editing.original, newName:f.name.value, kumaSlug:f.kumaSlug.value}});
+      await api('/api/admin/subgroups', {method:'PUT', body:{group:editing.group, name:editing.original, newName:f.name.value, kumaSlug:f.kumaSlug.value, ratio:f.ratio.value}});
     }
     hideForms();
     await reload('子组已保存，并已安排检测。');
@@ -690,6 +695,7 @@ $('groups').addEventListener('click', (e) => {
     $('subCopyHint').hidden = true;
     f.name.value = '';
     f.kumaSlug.value = '';
+    f.ratio.value = '';
     openModal('subModal');
     f.name.focus();
   } else if (act === 'edit-sub') {
@@ -701,6 +707,7 @@ $('groups').addEventListener('click', (e) => {
     $('subCopyHint').hidden = true;
     f.name.value = sg.name;
     f.kumaSlug.value = sg.kumaSlug || '';
+    f.ratio.value = sg.ratio || '';
     openModal('subModal');
     f.name.focus();
   } else if (act === 'copy-sub') {
@@ -712,6 +719,7 @@ $('groups').addEventListener('click', (e) => {
     $('subCopyHint').hidden = false;
     f.name.value = nextCopyName(group, sg.name);
     f.kumaSlug.value = '';
+    f.ratio.value = sg.ratio || '';
     openModal('subModal');
     f.name.focus();
     f.name.select();
