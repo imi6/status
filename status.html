@@ -159,6 +159,8 @@ body{min-height:100vh;background:var(--bg)}
 }
 .seg-tip b{display:block;margin-bottom:4px}
 .empty{grid-column:1 / -1;padding:48px 20px;text-align:center;color:var(--faint);border:1px dashed var(--border);border-radius:var(--radius);background:var(--panel)}
+.notice-card{width:min(520px,100%)}
+.notice-body{white-space:pre-wrap;word-break:break-word;line-height:1.7;max-height:min(60vh,420px);overflow:auto}
 .footer{margin-top:28px;text-align:center;color:var(--faint);font-size:12.5px}
 .footer a{color:var(--dim)}
 @media(max-width:1100px){
@@ -217,6 +219,15 @@ body{min-height:100vh;background:var(--bg)}
   <div class="footer" id="pageFooter"></div>
 </main>
 <div id="segTip" class="seg-tip" hidden></div>
+<div class="modal" id="noticeModal" hidden style="z-index:90">
+  <div class="modal-card notice-card" role="dialog" aria-modal="true" aria-labelledby="noticeTitle">
+    <div class="modal-head">
+      <h2 id="noticeTitle">公告</h2>
+      <button type="button" class="modal-close" id="noticeClose">知道了</button>
+    </div>
+    <div class="notice-body" id="noticeBody"></div>
+  </div>
+</div>
 <div class="modal" id="detailModal" hidden>
   <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="detailTitle">
     <div class="modal-head">
@@ -530,6 +541,7 @@ async function initFrontend(){
     if(f.footer){
       document.getElementById('pageFooter').innerHTML=f.footer;
     }
+    showNotice(f.noticeTitle, f.notice);
     _manualRefreshCooldown=cfg.manualRefreshCooldown||60;
     if(Array.isArray(cfg.groups)){
       _manualRefreshGroups=new Set(cfg.groups.filter(g=>g.manualRefresh).map(g=>g.name));
@@ -611,12 +623,37 @@ document.getElementById('app').addEventListener('click',ev=>{
   if(!card)return;
   openDetail(card.dataset.key||'');
 });
+function closeNotice(){
+  const modal=document.getElementById('noticeModal');
+  if(!modal || modal.hidden)return;
+  modal.hidden=true;
+  try{ if(modal.dataset.key) localStorage.setItem('statusNotice', modal.dataset.key); }catch(e){}
+}
+function showNotice(title, body){
+  const text=String(body||'').trim();
+  if(!text)return;
+  const heading=String(title||'').trim()||'公告';
+  const key=heading+'\n'+text;
+  try{ if(localStorage.getItem('statusNotice')===key)return; }catch(e){}
+  document.getElementById('noticeTitle').textContent=heading;
+  document.getElementById('noticeBody').textContent=text;
+  const modal=document.getElementById('noticeModal');
+  modal.dataset.key=key;
+  modal.hidden=false;
+}
+document.getElementById('noticeClose').addEventListener('click',closeNotice);
+document.getElementById('noticeModal').addEventListener('click',ev=>{
+  if(ev.target.id==='noticeModal')closeNotice();
+});
 document.getElementById('detailClose').addEventListener('click',closeDetail);
 document.getElementById('detailModal').addEventListener('click',ev=>{
   if(ev.target.id==='detailModal')closeDetail();
 });
 document.addEventListener('keydown',ev=>{
-  if(ev.key==='Escape')closeDetail();
+  if(ev.key!=='Escape')return;
+  const notice=document.getElementById('noticeModal');
+  if(notice && !notice.hidden){ closeNotice(); return; }
+  closeDetail();
 });
 start();
 const segTip=document.getElementById('segTip');

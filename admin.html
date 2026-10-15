@@ -162,6 +162,8 @@ button.drag:active{cursor:grabbing}
         <div class="grid">
           <label>标题<input name="title" required></label>
           <label>副标题<input name="subtitle"></label>
+          <label>公告标题<input name="noticeTitle" maxlength="40" placeholder="留空则显示“公告”"></label>
+          <label class="wide">弹窗公告<textarea name="notice" maxlength="2000" placeholder="留空则状态页不弹出"></textarea></label>
           <label class="wide">图标地址<input name="icon" spellcheck="false"></label>
           <label class="wide">默认接口地址<input name="defaultBaseURL" spellcheck="false" placeholder="https://zzshu.cc"></label>
           <label>检测间隔（秒）<input name="interval" type="number" min="5" max="86400" required></label>
@@ -173,15 +175,21 @@ button.drag:active{cursor:grabbing}
           <label class="wide">Telegram Bot Token<input name="tgToken" type="password" autocomplete="new-password" spellcheck="false" placeholder="123456:ABC..."></label>
           <label class="wide">Telegram 群组<textarea name="tgChat" spellcheck="false" placeholder="每行一个群组 ID"></textarea></label>
           <label>群推送间隔（分钟）<input name="tgInterval" type="number" min="0" max="10080" value="0"></label>
-          <label>官网<input name="tgWebsite" spellcheck="false" placeholder="zzshu.si"></label>
+          <label>监控网址<input name="tgStatus" spellcheck="false" placeholder="https://zzshu.si"></label>
+          <label>官网<input name="tgWebsite" spellcheck="false" placeholder="zzshu.cc"></label>
           <label>通知频道<input name="tgChannel" spellcheck="false" placeholder="@channel"></label>
           <label class="wide">页脚 HTML<textarea name="footer"></textarea></label>
         </div>
-        <p class="hint">后台路径就是地址里的目录名，不要用 admin 这种常见词。修改路径或端口后需要重启进程。状态页不会显示这个入口。默认接口地址会填进新建模型，留空则使用 https://zzshu.cc。把机器人拉进目标群后填写 Token。群组每行一个，同一条状态会发到全部群。推送的是各分组当前状态：近 12 小时颜色、成功率、名称和倍率。官网和通知频道会出现在消息最下面，留空则不显示。间隔填 0 时，状态一变化就发。填 30 则最多每 30 分钟发一次，没有变化不发。实际发送不会快过检测间隔。</p>
+        <p class="hint">后台路径就是地址里的目录名，不要用 admin 这种常见词。修改路径或端口后需要重启进程。状态页不会显示这个入口。默认接口地址会填进新建模型，留空则使用 https://zzshu.cc。弹窗公告留空则状态页不显示。访客关掉后，同一条内容不会再弹；改内容后会再次弹出。把机器人拉进目标群后填写 Token。群组每行一个，同一条状态会发到全部群。推送按分组列出：状态、成功率、名称和倍率。有多次采样时，行尾最多带 6 个颜色块，没有记录的空格子不再占一行。消息最下面会附上监控网址，默认是 https://zzshu.si。官网和通知频道各占一行，留空则不显示。间隔填 0 时，状态一变化就发。填 30 则最多每 30 分钟发一次，没有变化不发。实际发送不会快过检测间隔。</p>
         <div class="row-actions"><button type="submit">保存站点设置</button><button type="button" class="ghost" id="tgTest">发送测试</button></div>
       </form>
     </section>
 
+    <section class="card">
+      <h2>探测记录</h2>
+      <p class="hint">清空后，状态页上已有的颜色条、成功率和延迟样本都会去掉，从下一次检测重新计算。分组、模型、密钥和通知设置都会保留。此操作不能恢复。</p>
+      <div class="row-actions"><button type="button" class="warn" id="clearHistory">清空探测记录</button></div>
+    </section>
     <section class="card">
       <h2>后台密码</h2>
       <form id="passwordForm" autocomplete="off">
@@ -326,6 +334,8 @@ function fillSettings(){
   f.subtitle.value = front.subtitle || '';
   f.icon.value = front.icon || '';
   f.footer.value = front.footer || '';
+  f.noticeTitle.value = front.noticeTitle || '';
+  f.notice.value = front.notice || '';
   f.defaultBaseURL.value = state.defaultBaseURL || 'https://zzshu.cc';
   f.interval.value = state.interval || 60;
   f.cooldown.value = state.manualRefreshCooldown || 60;
@@ -338,6 +348,7 @@ function fillSettings(){
   const chatIDs = Array.isArray(tg.chatIDs) && tg.chatIDs.length ? tg.chatIDs : (tg.chatID ? [tg.chatID] : []);
   f.tgChat.value = chatIDs.join('\n');
   f.tgInterval.value = tg.interval || 0;
+  f.tgStatus.value = tg.statusURL || 'https://zzshu.si';
   f.tgWebsite.value = tg.website || '';
   f.tgChannel.value = tg.channel || '';
 }
@@ -419,10 +430,10 @@ $('settingsForm').addEventListener('submit', async (e) => {
       adminPath: f.adminPath.value,
       interval: Number(f.interval.value),
       manualRefreshCooldown: Number(f.cooldown.value),
-      frontend: {title:f.title.value, subtitle:f.subtitle.value, icon:f.icon.value, footer:f.footer.value},
+      frontend: {title:f.title.value, subtitle:f.subtitle.value, icon:f.icon.value, footer:f.footer.value, noticeTitle:f.noticeTitle.value, notice:f.notice.value},
       defaultBaseURL: f.defaultBaseURL.value,
       kuma: {baseURL:f.kumaBase.value, slug:f.kumaSlug.value},
-      telegram: {botToken:f.tgToken.value, chatIDs:f.tgChat.value.split(/\r?\n/).map(s => s.trim()).filter(Boolean), interval:Number(f.tgInterval.value || 0), website:f.tgWebsite.value, channel:f.tgChannel.value}
+      telegram: {botToken:f.tgToken.value, chatIDs:f.tgChat.value.split(/\r?\n/).map(s => s.trim()).filter(Boolean), interval:Number(f.tgInterval.value || 0), statusURL:f.tgStatus.value, website:f.tgWebsite.value, channel:f.tgChannel.value}
     }});
     await reload('站点设置已保存。');
   } catch (err) { showMsg(err.message, true); }
@@ -433,6 +444,16 @@ $('tgTest').addEventListener('click', async () => {
     await api('/api/admin/telegram-test', {method:'POST', body:{botToken:f.tgToken.value, chatIDs:f.tgChat.value.split(/\r?\n/).map(s => s.trim()).filter(Boolean)}});
     showMsg('测试消息已发到填写的群。保存设置后，才会按推送间隔自动推送。', false);
   } catch (err) { showMsg(err.message, true); }
+});
+$('clearHistory').addEventListener('click', async () => {
+  if (!confirm('清空全部探测记录？状态页上的历史颜色和成功率会重新开始计算，不能恢复。')) return;
+  const btn = $('clearHistory');
+  btn.disabled = true;
+  try {
+    const data = await api('/api/admin/clear-history', {method:'POST', body:{}});
+    showMsg('已清空 ' + (data.deleted || 0) + ' 条探测记录。', false);
+  } catch (err) { showMsg(err.message, true); }
+  btn.disabled = false;
 });
 $('passwordForm').addEventListener('submit', async (e) => {
   e.preventDefault();

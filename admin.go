@@ -491,6 +491,24 @@ func serveAdminPage(w http.ResponseWriter, r *http.Request) {
 	serveAsset(w, r, "admin.html")
 }
 
+func cleanStatusURL(v string) (string, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "https://zzshu.si", nil
+	}
+	if !strings.Contains(v, "://") {
+		v = "https://" + v
+	}
+	if len([]rune(v)) > 120 || strings.ContainsAny(v, " \r\n<>") {
+		return "", errors.New("监控网址不能包含空格、换行或尖括号")
+	}
+	u, err := url.Parse(v)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return "", errors.New("监控网址需是网址，例如 https://zzshu.si")
+	}
+	return strings.TrimRight(v, "/"), nil
+}
+
 func cleanBoardNote(v, what string) (string, error) {
 	v = strings.TrimSpace(v)
 	if v == "" {
@@ -530,6 +548,10 @@ func cleanTelegram(t TelegramConfig) (TelegramConfig, error) {
 		t.ChatID = ""
 	}
 	var err error
+	t.StatusURL, err = cleanStatusURL(t.StatusURL)
+	if err != nil {
+		return t, err
+	}
 	t.Website, err = cleanBoardNote(t.Website, "官网")
 	if err != nil {
 		return t, err
@@ -590,6 +612,24 @@ func validTelegramChat(id string) bool {
 	return true
 }
 
+func cleanNotice(front *FrontendConfig) error {
+	front.NoticeTitle = strings.TrimSpace(front.NoticeTitle)
+	front.Notice = strings.TrimSpace(front.Notice)
+	if front.Notice == "" {
+		if front.NoticeTitle != "" {
+			return errors.New("填写了公告标题时，公告内容不能为空")
+		}
+		return nil
+	}
+	if len([]rune(front.NoticeTitle)) > 40 {
+		return errors.New("公告标题不能超过 40 个字")
+	}
+	if len([]rune(front.Notice)) > 2000 {
+		return errors.New("公告内容不能超过 2000 个字")
+	}
+	return nil
+}
+
 func applySettings(c *Config, port, interval, cooldown int, adminPath, defaultBase string, front FrontendConfig, kuma KumaConfig, telegram TelegramConfig) error {
 	if port < 1 || port > 65535 {
 		return errors.New("端口需在 1 到 65535")
@@ -603,6 +643,9 @@ func applySettings(c *Config, port, interval, cooldown int, adminPath, defaultBa
 	front.Title = strings.TrimSpace(front.Title)
 	if front.Title == "" {
 		return errors.New("标题不能为空")
+	}
+	if err := cleanNotice(&front); err != nil {
+		return err
 	}
 	kuma.BaseURL = strings.TrimRight(strings.TrimSpace(kuma.BaseURL), "/")
 	kuma.Slug = strings.TrimSpace(kuma.Slug)
@@ -916,6 +959,11 @@ func apiAdmin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		adminTelegramTest(w, r)
+	case "clear-history":
+		if !requireAdmin(w, r) {
+			return
+		}
+		adminClearHistory(w, r)
 	default:
 		writeAdminJSON(w, 404, map[string]string{"error": "not found"})
 	}
@@ -1026,6 +1074,20 @@ func adminSaveSettings(w http.ResponseWriter, r *http.Request) {
 		return applySettings(c, body.Port, body.Interval, body.ManualRefreshCooldown, body.AdminPath, body.DefaultBaseURL, body.Frontend, body.Kuma, body.Telegram)
 	})
 	finishChange(w, err, false)
+}
+
+func adminClearHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeAdminJSON(w, 405, map[string]string{"error": "method not allowed"})
+		return
+	}
+	n, err := clearProbeHistory()
+	if err != nil {
+		writeAdminJSON(w, 500, map[string]string{"error": "清空失败"})
+		log.Println("clear history:", err)
+		return
+	}
+	writeAdminJSON(w, 200, map[string]any{"ok": true, "deleted": n})
 }
 
 func adminTelegramTest(w http.ResponseWriter, r *http.Request) {

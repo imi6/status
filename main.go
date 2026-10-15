@@ -16,17 +16,21 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	_ "modernc.org/sqlite"
 )
 
 // FrontendConfig 前端展示配置
 type FrontendConfig struct {
-	Title    string `json:"title"`
-	Icon     string `json:"icon,omitempty"`
-	Subtitle string `json:"subtitle,omitempty"`
-	Footer   string `json:"footer,omitempty"`
+	Title       string `json:"title"`
+	Icon        string `json:"icon,omitempty"`
+	Subtitle    string `json:"subtitle,omitempty"`
+	Footer      string `json:"footer,omitempty"`
+	NoticeTitle string `json:"noticeTitle,omitempty"`
+	Notice      string `json:"notice,omitempty"`
 }
 
 // Config 配置文件结构
@@ -44,12 +48,13 @@ type Config struct {
 }
 
 type TelegramConfig struct {
-	BotToken string   `json:"botToken"`
-	ChatID   string   `json:"chatID"`
-	ChatIDs  []string `json:"chatIDs,omitempty"`
-	Interval int      `json:"interval"` // 群推送间隔（分钟）。0 表示状态一变化就推送
-	Website  string   `json:"website"`  // 推送消息底部的官网，留空不显示
-	Channel  string   `json:"channel"`  // 推送消息底部的通知频道，留空不显示
+	BotToken  string   `json:"botToken"`
+	ChatID    string   `json:"chatID"`
+	ChatIDs   []string `json:"chatIDs,omitempty"`
+	Interval  int      `json:"interval"`  // 群推送间隔（分钟）。0 表示状态一变化就推送
+	StatusURL string   `json:"statusURL"` // 推送消息底部的监控页地址，留空则使用 https://zzshu.si
+	Website   string   `json:"website"`   // 推送消息底部的官网，留空不显示
+	Channel   string   `json:"channel"`   // 推送消息底部的通知频道，留空不显示
 }
 
 type KumaConfig struct {
@@ -196,6 +201,9 @@ func normalizeConfig(c *Config) {
 	c.Telegram.ChatIDs = splitChatIDs(append([]string{c.Telegram.ChatID}, c.Telegram.ChatIDs...)...)
 	if len(c.Telegram.ChatIDs) > 0 {
 		c.Telegram.ChatID = c.Telegram.ChatIDs[0]
+	}
+	if cleaned, err := cleanStatusURL(c.Telegram.StatusURL); err == nil {
+		c.Telegram.StatusURL = cleaned
 	}
 	c.Telegram.Website = strings.TrimSpace(c.Telegram.Website)
 	c.Telegram.Channel = strings.TrimSpace(c.Telegram.Channel)
@@ -795,6 +803,60 @@ func cleanupOld() {
 	db.Exec(`DELETE FROM checks WHERE checked_at < ?`, cutoff)
 }
 
+var (
+	historyEpoch        uint64
+	appliedHistoryEpoch uint64
+	telegramSyncedEpoch uint64
+)
+
+// clearProbeHistory 删除全部探测记录，并立刻让状态页回到无采样。
+func clearProbeHistory() (int64, error) {
+	if db == nil {
+		return 0, errors.New("数据库未就绪")
+	}
+	res, err := db.Exec(`DELETE FROM checks`)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	resetTelegramQueue()
+	atomic.AddUint64(&historyEpoch, 1)
+	hydrateStatus()
+	return n, nil
+}
+
+func refreshRowFromHistory(group string, row *GroupResp, now time.Time) {
+	statusStr, label := classifyProbeStatus(group, row.SubName, row.Name, now)
+	_, lat, lastAt := getLastCheck(group, row.SubName, row.Name)
+	row.Status = statusStr
+	row.Label = label
+	row.HealthScore = calcHealthScore(group, row.SubName, row.Name)
+	row.LatencyMs = lat
+	row.History = getHistory(group, row.SubName, row.Name, 120)
+	row.Timelines = buildTimelines(group, row.SubName, row.Name, now)
+	if lastAt.IsZero() {
+		row.LastCheckedAt = nil
+	} else {
+		at := lastAt
+		row.LastCheckedAt = &at
+	}
+}
+
+// ensureFreshHistory 清理发生在一轮探测中间时，把内存里的旧曲线换成数据库里的记录。
+func ensureFreshHistory(sections []Section) {
+	epoch := atomic.LoadUint64(&historyEpoch)
+	if epoch == atomic.LoadUint64(&appliedHistoryEpoch) {
+		return
+	}
+	now := time.Now()
+	for i := range sections {
+		for j := range sections[i].Rows {
+			refreshRowFromHistory(sections[i].Name, &sections[i].Rows[j], now)
+		}
+	}
+	atomic.StoreUint64(&appliedHistoryEpoch, epoch)
+}
+
 // 探测只发一句短话，并限制回复长度。必须从正文里读到模型写出的文字才算可用。
 const (
 	probePrompt    = "hi"
@@ -1140,6 +1202,7 @@ func updateRow(gName string, sg SubGroup, m Model, sections *[]Section, up bool,
 	row := snapshotRow(gName, sg, m, lat, lastAt, time.Now())
 
 	mu.Lock()
+	ensureFreshHistory(*sections)
 	*sections = upsertSectionRow(*sections, gName, row)
 	*sections = applyConfigOrder(*sections, cfg.Groups)
 	applyLiveRatios(*sections)
@@ -1378,6 +1441,7 @@ func refresh() {
 	// 根据 config 清理已不存在的条目，并立刻按后台顺序发布
 	sections = pruneStaleSections(sections, cfg)
 	mu.Lock()
+	ensureFreshHistory(sections)
 	sections = applyConfigOrder(sections, cfg.Groups)
 	applyLiveRatios(sections)
 	statusV2.Sections = sections
@@ -1428,6 +1492,7 @@ func refresh() {
 
 	// 全部检测完毕，标记 checking = false
 	mu.Lock()
+	ensureFreshHistory(sections)
 	sections = applyConfigOrder(sections, cfg.Groups)
 	applyLiveRatios(sections)
 	overallStatus, overallLabel := overallFromRows(sections)
@@ -1495,15 +1560,18 @@ func refresh() {
 	tgChats := append([]string(nil), cfg.Telegram.ChatIDs...)
 	tgEvery := time.Duration(cfg.Telegram.Interval) * time.Minute
 	tgTitle := cfg.Frontend.Title
-	tgWebsite, tgChannel := cfg.Telegram.Website, cfg.Telegram.Channel
+	tgStatus, tgWebsite, tgChannel := cfg.Telegram.StatusURL, cfg.Telegram.Website, cfg.Telegram.Channel
 	mu.RUnlock()
-	// 启动时已经用历史记录填过状态，第一轮探测只当基线，不推送。
+	// 启动后的第一轮，以及清空记录后的第一轮，只当基线，不推送。
 	nowPush := time.Now()
-	if !telegramBaselined {
+	historyNow := atomic.LoadUint64(&historyEpoch)
+	if !telegramBaselined || historyNow != atomic.LoadUint64(&telegramSyncedEpoch) {
 		telegramBaselined = true
+		atomic.StoreUint64(&telegramSyncedEpoch, historyNow)
+		resetTelegramQueue()
 		markTelegramPushed(nowPush)
 	} else if takeTelegram(prevRows, prevOverall, sections, overallStatus, overallLabel, tgEvery, nowPush) != "" {
-		texts := splitTelegram(formatStatusBoard(tgTitle, sections, nowPush, tgWebsite, tgChannel))
+		texts := splitTelegram(formatStatusBoard(tgTitle, sections, nowPush, tgStatus, tgWebsite, tgChannel))
 		if err := sendTelegramAll(tgToken, tgChats, texts); err != nil {
 			log.Println("telegram:", err)
 		}
@@ -1678,7 +1746,7 @@ func takeTelegram(prev map[string]string, prevOverall string, sections []Section
 	return text
 }
 
-func formatStatusBoard(title string, sections []Section, now time.Time, website, channel string) string {
+func formatStatusBoard(title string, sections []Section, now time.Time, statusURL, website, channel string) string {
 	title = strings.TrimSpace(title)
 	if title == "" {
 		title = "分组状态监控"
@@ -1690,42 +1758,125 @@ func formatStatusBoard(title string, sections []Section, now time.Time, website,
 		}
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s\n分组状态 | %s", title, now.Format("15:04"))
+	fmt.Fprintf(&b, "%s\n%s", title, now.Format("01/02 15:04"))
 	for _, sec := range sections {
+		if len(sec.Rows) == 0 {
+			continue
+		}
+		fmt.Fprintf(&b, "\n\n▸ %s", sec.Name)
 		for _, row := range sec.Rows {
-			name := strings.TrimSpace(row.SubName)
-			if name == "" {
-				name = sec.Name
-			}
-			if dup[sec.Name+"\x1f"+row.SubName] > 1 && strings.TrimSpace(row.Name) != "" {
-				name += " · " + strings.TrimSpace(row.Name)
-			}
-			rate, ok := boardRate(row.Timelines["hour"])
-			rateText := "--"
-			if ok {
-				rateText = fmt.Sprintf("%.2f%%", rate)
-			}
-			fmt.Fprintf(&b, "\n\n%s\n%s %s | %s%s", boardMarks(row.Timelines["hour"]), statusWord(row.Status), rateText, name, boardRatio(row.Ratio))
+			b.WriteByte('\n')
+			b.WriteString(boardLine(sec.Name, row, dup))
 		}
 	}
-	if footer := boardFooter(website, channel); footer != "" {
+	if footer := boardFooter(statusURL, website, channel); footer != "" {
 		b.WriteString("\n\n")
 		b.WriteString(footer)
 	}
 	return b.String()
 }
 
-func boardFooter(website, channel string) string {
+func boardLine(group string, row GroupResp, dup map[string]int) string {
+	name := strings.TrimSpace(row.SubName)
+	if name == "" {
+		name = group
+	}
+	name = trimGroupPrefix(group, name)
+	if dup[group+"\x1f"+row.SubName] > 1 && strings.TrimSpace(row.Name) != "" {
+		name += " · " + strings.TrimSpace(row.Name)
+	}
+	rate, ok := boardRate(row.Timelines["hour"])
+	line := fmt.Sprintf("%s %s  %s%s", statusMark(row.Status), formatBoardRate(rate, ok), name, boardRatio(row.Ratio))
+	if marks := boardMarks(row.Timelines["hour"]); marks != "" {
+		line += "  " + marks
+	}
+	return line
+}
+
+func statusMark(status string) string {
+	switch status {
+	case "up":
+		return "🟢"
+	case "degraded":
+		return "🟡"
+	case "down":
+		return "🔴"
+	default:
+		return "⚪"
+	}
+}
+
+func formatBoardRate(rate float64, ok bool) string {
+	if !ok {
+		return "--"
+	}
+	if rate < 0 {
+		rate = 0
+	}
+	if rate > 100 {
+		rate = 100
+	}
+	whole := int(rate + 0.5)
+	if rate-float64(whole) < 0.05 && float64(whole)-rate < 0.05 {
+		return fmt.Sprintf("%d%%", whole)
+	}
+	return fmt.Sprintf("%.1f%%", rate)
+}
+
+func trimGroupPrefix(group, name string) string {
+	group = strings.TrimSpace(group)
+	name = strings.TrimSpace(name)
+	if group == "" || len(name) <= len(group) || !strings.EqualFold(name[:len(group)], group) {
+		return name
+	}
+	rest := name[len(group):]
+	r, _ := utf8.DecodeRuneInString(rest)
+	if !isBoardSep(r) {
+		return name
+	}
+	rest = strings.TrimLeftFunc(rest, isBoardSep)
+	rest = strings.TrimSpace(rest)
+	if rest == "" {
+		return name
+	}
+	return rest
+}
+
+func isBoardSep(r rune) bool {
+	switch r {
+	case ' ', '\t', '-', '—', '–', '·', '•', '|', '｜', ':', '：', '/':
+		return true
+	default:
+		return false
+	}
+}
+
+func boardFooter(statusURL, website, channel string) string {
+	cleaned, err := cleanStatusURL(statusURL)
+	if err != nil || cleaned == "" {
+		cleaned = "https://zzshu.si"
+	}
+	statusURL = cleaned
 	website = strings.TrimSpace(website)
 	channel = strings.TrimSpace(channel)
-	var parts []string
-	if website != "" {
-		parts = append(parts, "官网："+website)
+	parts := []string{"监控 " + statusURL}
+	if website != "" && !sameBoardLink(website, statusURL) {
+		parts = append(parts, "官网 "+website)
 	}
 	if channel != "" {
-		parts = append(parts, "通知频道："+channel)
+		parts = append(parts, "通知频道 "+channel)
 	}
-	return strings.Join(parts, " ")
+	return strings.Join(parts, "\n")
+}
+
+func sameBoardLink(a, b string) bool {
+	trim := func(v string) string {
+		v = strings.TrimSpace(strings.ToLower(v))
+		v = strings.TrimPrefix(v, "https://")
+		v = strings.TrimPrefix(v, "http://")
+		return strings.Trim(v, "/")
+	}
+	return trim(a) != "" && trim(a) == trim(b)
 }
 
 func boardRate(buckets []TimelineBucket) (float64, bool) {
@@ -1741,14 +1892,21 @@ func boardMarks(buckets []TimelineBucket) string {
 	if len(buckets) > 12 {
 		buckets = buckets[len(buckets)-12:]
 	}
-	if len(buckets) == 0 {
-		return "⬜"
+	var sampled []TimelineBucket
+	for _, bucket := range buckets {
+		if bucket.Samples > 0 {
+			sampled = append(sampled, bucket)
+		}
+	}
+	if len(sampled) < 2 {
+		return ""
+	}
+	if len(sampled) > 6 {
+		sampled = sampled[len(sampled)-6:]
 	}
 	var b strings.Builder
-	for _, bucket := range buckets {
+	for _, bucket := range sampled {
 		switch {
-		case bucket.Samples == 0:
-			b.WriteString("⬜")
 		case bucket.Rate >= 90:
 			b.WriteString("🟩")
 		case bucket.Rate >= 60:

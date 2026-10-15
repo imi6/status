@@ -323,22 +323,26 @@ func TestStatusBoardMessage(t *testing.T) {
 		{Name: "plus", SubName: "GPT Plus", Status: "up", Ratio: "0.09", Timelines: map[string][]TimelineBucket{"hour": hour}},
 		{Name: "pro", SubName: "GPT Pro", Status: "degraded", Timelines: map[string][]TimelineBucket{"hour": {{Samples: 5, Up: 2, Rate: 40}}}},
 	}}}
-	text := formatStatusBoard("吱吱鼠AI监控", sections, now, "zzshu.si", "@zzshu")
-	if !strings.Contains(text, "吱吱鼠AI监控") || !strings.Contains(text, "分组状态 | 14:40") {
+	text := formatStatusBoard("吱吱鼠AI监控", sections, now, "", "zzshu.cc", "@zzshu")
+	if !strings.Contains(text, "吱吱鼠AI监控\n10/15 14:40") {
 		t.Fatalf("header:\n%s", text)
 	}
-	if !strings.Contains(text, "正常 100.00% | GPT Plus ×0.09") || !strings.Contains(text, "🟩") || !strings.Contains(text, "🟨") {
+	if !strings.Contains(text, "▸ GPT\n🟢 100%  Plus ×0.09  🟨🟩") {
 		t.Fatalf("plus:\n%s", text)
 	}
-	if !strings.Contains(text, "降级 40.00% | GPT Pro") || !strings.Contains(text, "🟥") || strings.Contains(text, "GPT Pro ×") {
+	if !strings.Contains(text, "🟡 40%  Pro") || strings.Contains(text, "Pro ×") || strings.Contains(text, "⬜") || strings.Contains(text, "🟥") {
 		t.Fatalf("pro:\n%s", text)
 	}
-	if !strings.HasSuffix(text, "官网：zzshu.si 通知频道：@zzshu") {
+	if !strings.HasSuffix(text, "监控 https://zzshu.si\n官网 zzshu.cc\n通知频道 @zzshu") {
 		t.Fatalf("footer:\n%s", text)
 	}
-	plain := formatStatusBoard("吱吱鼠AI监控", sections, now, "", "")
-	if strings.Contains(plain, "官网") || strings.Contains(plain, "通知频道") {
+	plain := formatStatusBoard("吱吱鼠AI监控", sections, now, "", "", "")
+	if strings.Contains(plain, "官网") || strings.Contains(plain, "通知频道") || !strings.HasSuffix(plain, "监控 https://zzshu.si") {
 		t.Fatalf("empty footer:\n%s", plain)
+	}
+	same := formatStatusBoard("吱吱鼠AI监控", sections, now, "zzshu.si", "https://zzshu.si", "")
+	if strings.Contains(same, "官网") || !strings.HasSuffix(same, "监控 https://zzshu.si") {
+		t.Fatalf("duplicate site:\n%s", same)
 	}
 }
 
@@ -569,5 +573,35 @@ func TestEmptyModelBaseUsesDefault(t *testing.T) {
 	}
 	if c.Groups[0].SubGroups[0].Models[0].BaseURL != "https://zzshu.cc/v1" {
 		t.Fatalf("base = %q", c.Groups[0].SubGroups[0].Models[0].BaseURL)
+	}
+}
+
+func TestNoticeSettings(t *testing.T) {
+	c := Config{}
+	err := applySettings(&c, 8080, 60, 60, "", "", FrontendConfig{
+		Title:       "监控",
+		NoticeTitle: "  维护通知  ",
+		Notice:      "  今晚 1 点升级。\n请稍候。  ",
+	}, KumaConfig{}, TelegramConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Frontend.NoticeTitle != "维护通知" || c.Frontend.Notice != "今晚 1 点升级。\n请稍候。" {
+		t.Fatalf("%+v", c.Frontend)
+	}
+	if err := applySettings(&c, 8080, 60, 60, "", "", FrontendConfig{Title: "监控", NoticeTitle: "只有标题"}, KumaConfig{}, TelegramConfig{}); err == nil {
+		t.Fatal("expected title without body")
+	}
+	if c.Frontend.Notice != "今晚 1 点升级。\n请稍候。" {
+		t.Fatal("failed save changed notice")
+	}
+	if err := applySettings(&c, 8080, 60, 60, "", "", FrontendConfig{Title: "监控", Notice: strings.Repeat("字", 2001)}, KumaConfig{}, TelegramConfig{}); err == nil {
+		t.Fatal("expected long notice")
+	}
+	if err := applySettings(&c, 8080, 60, 60, "", "", FrontendConfig{Title: "监控"}, KumaConfig{}, TelegramConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	if c.Frontend.Notice != "" || c.Frontend.NoticeTitle != "" {
+		t.Fatalf("cleared %+v", c.Frontend)
 	}
 }

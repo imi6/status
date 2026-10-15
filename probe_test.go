@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -237,6 +238,71 @@ func TestHydrateStatusShowsSavedGroups(t *testing.T) {
 	}
 	if statusV2.Sections[0].Rows[1].SubName != "GPT Plus" || statusV2.Sections[0].Rows[1].Status != "unknown" {
 		t.Fatalf("plus %+v", statusV2.Sections[0].Rows[1])
+	}
+}
+
+func TestClearProbeHistory(t *testing.T) {
+	oldDB := db
+	oldCfg := cfg
+	oldEpoch := atomic.LoadUint64(&historyEpoch)
+	oldApplied := atomic.LoadUint64(&appliedHistoryEpoch)
+	mu.Lock()
+	oldStatus := statusV2
+	mu.Unlock()
+	opened, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "checks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db = opened
+	t.Cleanup(func() {
+		opened.Close()
+		db = oldDB
+		atomic.StoreUint64(&historyEpoch, oldEpoch)
+		atomic.StoreUint64(&appliedHistoryEpoch, oldApplied)
+		mu.Lock()
+		cfg = oldCfg
+		statusV2 = oldStatus
+		mu.Unlock()
+	})
+	if err := ensureSchema(); err != nil {
+		t.Fatal(err)
+	}
+	checked := time.Now().Add(-time.Minute)
+	if _, err := db.Exec(
+		`INSERT INTO checks (group_name, sub_name, model_id, up, latency, checked_at) VALUES (?,?,?,?,?,?)`,
+		"GPT", "GPT Pro", "gpt", 1, 1500, checked.Unix(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	cfg = Config{Frontend: FrontendConfig{Title: "监控"}, Groups: []Group{{
+		Name:      "GPT",
+		SubGroups: []SubGroup{{Name: "GPT Pro", Models: []Model{{ID: "gpt", Provider: "openai-compat"}}}},
+	}}}
+	mu.Unlock()
+	hydrateStatus()
+	n, err := clearProbeHistory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("deleted %d", n)
+	}
+	var left int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM checks`).Scan(&left); err != nil {
+		t.Fatal(err)
+	}
+	if left != 0 {
+		t.Fatalf("left %d", left)
+	}
+	mu.RLock()
+	defer mu.RUnlock()
+	if len(statusV2.Sections) != 1 || len(statusV2.Sections[0].Rows) != 1 {
+		t.Fatalf("sections %+v", statusV2.Sections)
+	}
+	row := statusV2.Sections[0].Rows[0]
+	if row.Status != "unknown" || row.LatencyMs != 0 || row.LastCheckedAt != nil || len(row.Timelines["probe"]) != 0 {
+		t.Fatalf("row %+v", row)
 	}
 }
 
