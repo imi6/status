@@ -175,12 +175,12 @@ button.drag:active{cursor:grabbing}
           <label class="wide">Telegram Bot Token<input name="tgToken" type="password" autocomplete="new-password" spellcheck="false" placeholder="123456:ABC..."></label>
           <label class="wide">Telegram 群组<textarea name="tgChat" spellcheck="false" placeholder="每行一个群组 ID"></textarea></label>
           <label>群推送间隔（分钟）<input name="tgInterval" type="number" min="0" max="10080" value="0"></label>
-          <label>监控网址<input name="tgStatus" spellcheck="false" placeholder="https://zzshu.si"></label>
+          <label>监控网址<input name="tgStatus" spellcheck="false" placeholder="zzshu.si"></label>
           <label>官网<input name="tgWebsite" spellcheck="false" placeholder="zzshu.cc"></label>
           <label>通知频道<input name="tgChannel" spellcheck="false" placeholder="@channel"></label>
           <label class="wide">页脚 HTML<textarea name="footer"></textarea></label>
         </div>
-        <p class="hint">后台路径就是地址里的目录名，不要用 admin 这种常见词。修改路径或端口后需要重启进程。状态页不会显示这个入口。默认接口地址会填进新建模型，留空则使用 https://zzshu.cc。弹窗公告留空则状态页不显示。访客关掉后，同一条内容不会再弹；改内容后会再次弹出。把机器人拉进目标群后填写 Token。群组每行一个，同一条状态会发到全部群。推送按分组列出：状态、成功率、名称和倍率。有多次采样时，行尾最多带 6 个颜色块，没有记录的空格子不再占一行。消息最下面会附上监控网址，默认是 https://zzshu.si。官网和通知频道各占一行，留空则不显示。间隔填 0 时，状态一变化就发。填 30 则最多每 30 分钟发一次，没有变化不发。实际发送不会快过检测间隔。</p>
+        <p class="hint">后台路径就是地址里的目录名，不要用 admin 这种常见词。修改路径或端口后需要重启进程。状态页不会显示这个入口。默认接口地址会填进新建模型，留空则使用 https://zzshu.cc。弹窗公告留空则状态页不显示。访客关掉后，同一条内容不会再弹；改内容后会再次弹出。把机器人拉进目标群后填写 Token。群组每行一个，同一条状态会发到全部群。推送按分组列出：状态、成功率、名称和倍率。有多次采样时，行尾最多带 6 个颜色块，没有记录的空格子不再占一行。消息最下面会附上监控网址，默认是 zzshu.si，按填写的原文发送，不会自动加 https://。官网和通知频道各占一行，留空则不显示。间隔填 0 时，状态一变化就发。填 30 则最多每 30 分钟发一次，没有变化不发。实际发送不会快过检测间隔。</p>
         <div class="row-actions"><button type="submit">保存站点设置</button><button type="button" class="ghost" id="tgTest">发送测试</button></div>
       </form>
     </section>
@@ -348,7 +348,7 @@ function fillSettings(){
   const chatIDs = Array.isArray(tg.chatIDs) && tg.chatIDs.length ? tg.chatIDs : (tg.chatID ? [tg.chatID] : []);
   f.tgChat.value = chatIDs.join('\n');
   f.tgInterval.value = tg.interval || 0;
-  f.tgStatus.value = tg.statusURL || 'https://zzshu.si';
+  f.tgStatus.value = tg.statusURL || 'zzshu.si';
   f.tgWebsite.value = tg.website || '';
   f.tgChannel.value = tg.channel || '';
 }

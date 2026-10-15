@@ -493,20 +493,21 @@ func serveAdminPage(w http.ResponseWriter, r *http.Request) {
 
 func cleanStatusURL(v string) (string, error) {
 	v = strings.TrimSpace(v)
+	lower := strings.ToLower(v)
+	for _, prefix := range []string{"https://", "http://"} {
+		if strings.HasPrefix(lower, prefix) {
+			v = v[len(prefix):]
+			break
+		}
+	}
+	v = strings.TrimRight(strings.TrimSpace(v), "/")
 	if v == "" {
-		return "https://zzshu.si", nil
+		return "zzshu.si", nil
 	}
-	if !strings.Contains(v, "://") {
-		v = "https://" + v
-	}
-	if len([]rune(v)) > 120 || strings.ContainsAny(v, " \r\n<>") {
+	if len([]rune(v)) > 120 || strings.ContainsAny(v, " \r\n<>") || strings.Contains(v, "://") {
 		return "", errors.New("监控网址不能包含空格、换行或尖括号")
 	}
-	u, err := url.Parse(v)
-	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
-		return "", errors.New("监控网址需是网址，例如 https://zzshu.si")
-	}
-	return strings.TrimRight(v, "/"), nil
+	return v, nil
 }
 
 func cleanBoardNote(v, what string) (string, error) {

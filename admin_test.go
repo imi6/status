@@ -333,15 +333,15 @@ func TestStatusBoardMessage(t *testing.T) {
 	if !strings.Contains(text, "🟡 40%  Pro") || strings.Contains(text, "Pro ×") || strings.Contains(text, "⬜") || strings.Contains(text, "🟥") {
 		t.Fatalf("pro:\n%s", text)
 	}
-	if !strings.HasSuffix(text, "监控 https://zzshu.si\n官网 zzshu.cc\n通知频道 @zzshu") {
+	if !strings.HasSuffix(text, "监控 zzshu.si\n官网 zzshu.cc\n通知频道 @zzshu") || strings.Contains(text, "https://") {
 		t.Fatalf("footer:\n%s", text)
 	}
 	plain := formatStatusBoard("吱吱鼠AI监控", sections, now, "", "", "")
-	if strings.Contains(plain, "官网") || strings.Contains(plain, "通知频道") || !strings.HasSuffix(plain, "监控 https://zzshu.si") {
+	if strings.Contains(plain, "官网") || strings.Contains(plain, "通知频道") || !strings.HasSuffix(plain, "监控 zzshu.si") || strings.Contains(plain, "https://") {
 		t.Fatalf("empty footer:\n%s", plain)
 	}
-	same := formatStatusBoard("吱吱鼠AI监控", sections, now, "zzshu.si", "https://zzshu.si", "")
-	if strings.Contains(same, "官网") || !strings.HasSuffix(same, "监控 https://zzshu.si") {
+	same := formatStatusBoard("吱吱鼠AI监控", sections, now, "https://zzshu.si", "https://zzshu.si", "")
+	if strings.Contains(same, "官网") || strings.Contains(same, "https://") || !strings.HasSuffix(same, "监控 zzshu.si") {
 		t.Fatalf("duplicate site:\n%s", same)
 	}
 }

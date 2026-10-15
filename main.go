@@ -52,7 +52,7 @@ type TelegramConfig struct {
 	ChatID    string   `json:"chatID"`
 	ChatIDs   []string `json:"chatIDs,omitempty"`
 	Interval  int      `json:"interval"`  // 群推送间隔（分钟）。0 表示状态一变化就推送
-	StatusURL string   `json:"statusURL"` // 推送消息底部的监控页地址，留空则使用 https://zzshu.si
+	StatusURL string   `json:"statusURL"` // 推送消息底部的监控页地址，留空则使用 zzshu.si，不补协议
 	Website   string   `json:"website"`   // 推送消息底部的官网，留空不显示
 	Channel   string   `json:"channel"`   // 推送消息底部的通知频道，留空不显示
 }
@@ -1854,7 +1854,7 @@ func isBoardSep(r rune) bool {
 func boardFooter(statusURL, website, channel string) string {
 	cleaned, err := cleanStatusURL(statusURL)
 	if err != nil || cleaned == "" {
-		cleaned = "https://zzshu.si"
+		cleaned = "zzshu.si"
 	}
 	statusURL = cleaned
 	website = strings.TrimSpace(website)
