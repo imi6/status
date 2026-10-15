@@ -1053,6 +1053,55 @@ func upsertSectionRow(sections []Section, gName string, row GroupResp) []Section
 	return sections
 }
 
+func reorderSections(names []string) {
+	index := make(map[string]int, len(names))
+	for i, name := range names {
+		index[strings.TrimSpace(name)] = i
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	sections := statusV2.Sections
+	sort.SliceStable(sections, func(a, b int) bool {
+		ia, oka := index[sections[a].Name]
+		ib, okb := index[sections[b].Name]
+		if !oka {
+			ia = len(names)
+		}
+		if !okb {
+			ib = len(names)
+		}
+		return ia < ib
+	})
+	statusV2.Sections = sections
+}
+
+func reorderSectionRows(group string, names []string) {
+	index := make(map[string]int, len(names))
+	for i, name := range names {
+		index[strings.TrimSpace(name)] = i
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for i := range statusV2.Sections {
+		if statusV2.Sections[i].Name != group {
+			continue
+		}
+		rows := statusV2.Sections[i].Rows
+		sort.SliceStable(rows, func(a, b int) bool {
+			ia, oka := index[rows[a].SubName]
+			ib, okb := index[rows[b].SubName]
+			if !oka {
+				ia = len(names)
+			}
+			if !okb {
+				ib = len(names)
+			}
+			return ia < ib
+		})
+		statusV2.Sections[i].Rows = rows
+	}
+}
+
 // pruneStaleSections 根据 config 当前条目移除 sections 中已不存在的 group/subGroup/model 行
 func pruneStaleSections(sections []Section, cfg Config) []Section {
 	// 建立 config 中有效条目的集合: "groupName|subName|modelID"

@@ -67,6 +67,13 @@ textarea{min-height:72px;resize:vertical}
 .group-head,.sub-head,.model{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}
 .group-head h3{font-size:16px;font-weight:680}
 .subgroup{margin-top:12px;padding:12px 14px;background:var(--panel-2);border:1px solid var(--border-soft);border-radius:10px}
+.subgroup.dragging{opacity:.55;outline:1px dashed var(--accent)}
+.sub-title{display:flex;align-items:flex-start;gap:10px;min-width:0}
+button.drag{
+  width:32px;height:32px;padding:0;flex:none;cursor:grab;touch-action:none;
+  background:var(--panel);color:var(--faint);border:1px solid var(--border);border-radius:8px;
+}
+button.drag:active{cursor:grabbing}
 .sub-head h4{font-size:14px;font-weight:650}
 .meta{color:var(--faint);font-size:12px;margin-top:2px}
 .model{border-top:1px solid var(--border-soft);padding:10px 0;align-items:center}
@@ -84,6 +91,8 @@ textarea{min-height:72px;resize:vertical}
 .empty{color:var(--faint);padding:8px 0}
 .tabs{display:flex;gap:8px;margin-top:18px}
 .group-tabs{display:flex;gap:8px;margin-top:14px;overflow-x:auto;padding-bottom:4px}
+.group-tabs .tab{cursor:grab;touch-action:none}
+.group-tabs .tab.dragging{cursor:grabbing;opacity:.55}
 .tab{
   background:var(--panel);color:var(--dim);border:1px solid var(--border);
   border-radius:999px;padding:7px 16px;cursor:pointer;font:inherit;font-weight:650;
@@ -338,7 +347,7 @@ function render(){
   }
   if (!groups.some(g => g.name === _modelGroup)) _modelGroup = groups[0].name;
   tabs.hidden = false;
-  tabs.innerHTML = groups.map(g => '<button type="button" class="tab' + (g.name === _modelGroup ? ' active' : '') + '" data-model-group="' + escapeHtml(g.name) + '">' + escapeHtml(g.name) + '</button>').join('');
+  tabs.innerHTML = groups.map(g => '<button type="button" class="tab' + (g.name === _modelGroup ? ' active' : '') + '" data-model-group="' + escapeHtml(g.name) + '" title="拖动排序">' + escapeHtml(g.name) + '</button>').join('');
   const shown = groups.filter(g => g.name === _modelGroup);
   root.innerHTML = shown.map(g => {
     const subs = g.subGroups || [];
@@ -347,7 +356,7 @@ function render(){
       const modelHtml = models.length ? models.map((m, mi) => (
         '<div class="model"><div><b>' + escapeHtml(m.id) + '</b><span>' + escapeHtml(providerLabel(m.provider)) + ' · ' + escapeHtml(m.baseURL || '') + ' · ' + escapeHtml(maskKey(m.key)) + ' · ' + (m.timeout || 30) + 's</span></div><div class="links"><button type="button" data-act="edit-model" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '" data-index="' + mi + '">编辑</button> <button type="button" class="warn" data-act="del-model" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '" data-index="' + mi + '">删除</button></div></div>'
       )).join('') : '<p class="empty">此子组还没有模型。</p>';
-      return '<div class="subgroup"><div class="sub-head"><div><h4>' + escapeHtml(sg.name) + '</h4><div class="meta">' + (sg.kumaSlug ? ('Kuma ' + escapeHtml(sg.kumaSlug)) : '未设置独立 Kuma') + '</div></div><div class="links"><button type="button" data-act="add-model" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '">添加模型</button> <button type="button" data-act="edit-sub" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '">编辑</button> <button type="button" data-act="copy-sub" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '">复制</button> <button type="button" class="warn" data-act="del-sub" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '">删除</button></div></div>' + modelHtml + '</div>';
+      return '<div class="subgroup" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '"><div class="sub-head"><div class="sub-title"><button type="button" class="drag" title="拖动排序" aria-label="拖动排序">⋮⋮</button><div><h4>' + escapeHtml(sg.name) + '</h4><div class="meta">' + (sg.kumaSlug ? ('Kuma ' + escapeHtml(sg.kumaSlug)) : '未设置独立 Kuma') + '</div></div></div><div class="links"><button type="button" data-act="add-model" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '">添加模型</button> <button type="button" data-act="edit-sub" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '">编辑</button> <button type="button" data-act="copy-sub" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '">复制</button> <button type="button" class="warn" data-act="del-sub" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '">删除</button></div></div>' + modelHtml + '</div>';
     }).join('') : '<p class="empty">此分组还没有子组。</p>';
     return '<section class="group"><div class="group-head"><div><h3>' + escapeHtml(g.name) + '</h3><div class="meta">' + (g.manualRefresh ? '显示手动刷新' : '无手动刷新') + '</div></div><div class="links"><button type="button" data-act="add-sub" data-group="' + escapeHtml(g.name) + '">添加子组</button> <button type="button" data-act="edit-group" data-group="' + escapeHtml(g.name) + '">编辑</button> <button type="button" class="warn" data-act="del-group" data-group="' + escapeHtml(g.name) + '">删除</button></div></div>' + subHtml + '</section>';
   }).join('');
@@ -538,7 +547,109 @@ document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   hideForms();
 });
+let _drag = null;
+function subgroupOrder(){
+  return [...$('groups').querySelectorAll('.subgroup')].map(el => el.dataset.sub || '');
+}
+function moveSubgroup(card, x, y){
+  const under = document.elementFromPoint(x, y);
+  const target = under && under.closest('.subgroup');
+  if (!target || target === card || target.dataset.group !== card.dataset.group) return;
+  const rect = target.getBoundingClientRect();
+  if (y > rect.top + rect.height / 2) target.after(card);
+  else target.before(card);
+}
+$('groups').addEventListener('pointerdown', (e) => {
+  const handle = e.target.closest('.drag');
+  if (!handle || e.button !== 0) return;
+  const card = handle.closest('.subgroup');
+  if (!card) return;
+  e.preventDefault();
+  handle.setPointerCapture(e.pointerId);
+  _drag = {card, group: card.dataset.group || '', start: subgroupOrder().join('\n'), pointerId: e.pointerId};
+  card.classList.add('dragging');
+});
+$('groups').addEventListener('pointermove', (e) => {
+  if (!_drag || e.pointerId !== _drag.pointerId) return;
+  moveSubgroup(_drag.card, e.clientX, e.clientY);
+});
+async function finishSubgroupDrag(e){
+  if (!_drag || e.pointerId !== _drag.pointerId) return;
+  const drag = _drag;
+  _drag = null;
+  drag.card.classList.remove('dragging');
+  const names = subgroupOrder();
+  if (names.join('\n') === drag.start) return;
+  try {
+    await api('/api/admin/subgroups', {method:'PATCH', body:{group:drag.group, order:names}});
+    const g = findGroup(drag.group);
+    if (g) {
+      const by = new Map((g.subGroups || []).map(sg => [sg.name, sg]));
+      g.subGroups = names.map(name => by.get(name)).filter(Boolean);
+    }
+    showMsg('子组顺序已保存。', false);
+  } catch (err) {
+    showMsg(err.message, true);
+    render();
+  }
+}
+$('groups').addEventListener('pointerup', finishSubgroupDrag);
+$('groups').addEventListener('pointercancel', finishSubgroupDrag);
+let _tabDrag = null;
+let _suppressTabClick = false;
+function groupTabOrder(){
+  return [...$('groupTabs').querySelectorAll('[data-model-group]')].map(el => el.dataset.modelGroup || '');
+}
+function moveGroupTab(tab, x){
+  const tabs = [...$('groupTabs').querySelectorAll('[data-model-group]')].filter(el => el !== tab);
+  let target = null;
+  for (const el of tabs) {
+    const rect = el.getBoundingClientRect();
+    if (x < rect.left + rect.width / 2) { target = el; break; }
+  }
+  if (target) target.before(tab);
+  else if (tabs.length) tabs[tabs.length - 1].after(tab);
+}
+$('groupTabs').addEventListener('pointerdown', (e) => {
+  const tab = e.target.closest('[data-model-group]');
+  if (!tab || e.button !== 0) return;
+  _tabDrag = {tab, pointerId: e.pointerId, x: e.clientX, moved: false, start: groupTabOrder().join('\n')};
+});
+$('groupTabs').addEventListener('pointermove', (e) => {
+  if (!_tabDrag || e.pointerId !== _tabDrag.pointerId) return;
+  if (!_tabDrag.moved) {
+    if (Math.abs(e.clientX - _tabDrag.x) < 4) return;
+    _tabDrag.moved = true;
+    _tabDrag.tab.setPointerCapture(e.pointerId);
+    _tabDrag.tab.classList.add('dragging');
+  }
+  moveGroupTab(_tabDrag.tab, e.clientX);
+});
+async function finishGroupDrag(e){
+  if (!_tabDrag || e.pointerId !== _tabDrag.pointerId) return;
+  const drag = _tabDrag;
+  _tabDrag = null;
+  drag.tab.classList.remove('dragging');
+  if (!drag.moved) return;
+  _suppressTabClick = true;
+  const names = groupTabOrder();
+  if (names.join('\n') === drag.start) return;
+  const previous = state.groups || [];
+  const by = new Map(previous.map(g => [g.name, g]));
+  state.groups = names.map(name => by.get(name)).filter(Boolean);
+  try {
+    await api('/api/admin/groups', {method:'PATCH', body:{order:names}});
+    showMsg('分组顺序已保存。', false);
+  } catch (err) {
+    state.groups = previous;
+    showMsg(err.message, true);
+    render();
+  }
+}
+$('groupTabs').addEventListener('pointerup', finishGroupDrag);
+$('groupTabs').addEventListener('pointercancel', finishGroupDrag);
 $('groupTabs').addEventListener('click', (e) => {
+  if (_suppressTabClick) { _suppressTabClick = false; return; }
   const tab = e.target.closest('[data-model-group]');
   if (!tab) return;
   _modelGroup = tab.dataset.modelGroup || '';

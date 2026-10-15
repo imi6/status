@@ -363,6 +363,66 @@ func TestTelegramDigestAndSend(t *testing.T) {
 	}
 }
 
+func TestReorderGroups(t *testing.T) {
+	c := Config{Groups: []Group{{Name: "GPT"}, {Name: "Claude", SubGroups: []SubGroup{{Name: "Max"}}}, {Name: "Grok"}}}
+	if err := reorderGroups(&c, []string{"Grok", "GPT", "Claude"}); err != nil {
+		t.Fatal(err)
+	}
+	if c.Groups[0].Name != "Grok" || c.Groups[1].Name != "GPT" || c.Groups[2].SubGroups[0].Name != "Max" {
+		t.Fatalf("%s %s", c.Groups[0].Name, c.Groups[2].Name)
+	}
+	if err := reorderGroups(&c, []string{"Grok"}); err == nil {
+		t.Fatal("expected incomplete order")
+	}
+	mu.Lock()
+	old := statusV2
+	statusV2 = StatusRespV2{Sections: []Section{{Name: "GPT"}, {Name: "Claude"}, {Name: "Grok"}}}
+	mu.Unlock()
+	reorderSections([]string{"Grok", "GPT", "Claude"})
+	mu.Lock()
+	names := []string{statusV2.Sections[0].Name, statusV2.Sections[1].Name, statusV2.Sections[2].Name}
+	statusV2 = old
+	mu.Unlock()
+	if names[0] != "Grok" || names[1] != "GPT" || names[2] != "Claude" {
+		t.Fatalf("%v", names)
+	}
+}
+
+func TestReorderSubGroups(t *testing.T) {
+	c := Config{Groups: []Group{{Name: "G", SubGroups: []SubGroup{
+		{Name: "A", Models: []Model{{ID: "a"}}},
+		{Name: "B"},
+		{Name: "C"},
+	}}}}
+	if err := reorderSubGroups(&c, "G", []string{"C", "A", "B"}); err != nil {
+		t.Fatal(err)
+	}
+	got := c.Groups[0].SubGroups
+	if got[0].Name != "C" || got[1].Name != "A" || got[1].Models[0].ID != "a" || got[2].Name != "B" {
+		t.Fatalf("%s %s %s", got[0].Name, got[1].Name, got[2].Name)
+	}
+	if err := reorderSubGroups(&c, "G", []string{"C", "A"}); err == nil {
+		t.Fatal("expected incomplete order")
+	}
+
+	mu.Lock()
+	old := statusV2
+	statusV2 = StatusRespV2{Sections: []Section{{Name: "G", Rows: []GroupResp{
+		{Name: "m1", SubName: "A"},
+		{Name: "m2", SubName: "B"},
+		{Name: "m3", SubName: "A"},
+	}}}}
+	mu.Unlock()
+	reorderSectionRows("G", []string{"B", "A"})
+	mu.Lock()
+	rows := append([]GroupResp(nil), statusV2.Sections[0].Rows...)
+	statusV2 = old
+	mu.Unlock()
+	if rows[0].SubName != "B" || rows[1].Name != "m1" || rows[2].Name != "m3" {
+		t.Fatalf("%+v", rows)
+	}
+}
+
 func TestCopySubGroup(t *testing.T) {
 	c := Config{Groups: []Group{{Name: "Claude", SubGroups: []SubGroup{{
 		Name:     "Claude Max",

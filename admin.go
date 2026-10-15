@@ -144,6 +144,29 @@ func updateGroup(c *Config, name, newName string, manual bool) error {
 	return nil
 }
 
+func reorderGroups(c *Config, names []string) error {
+	if len(names) != len(c.Groups) {
+		return errors.New("排序不完整")
+	}
+	byName := make(map[string]Group, len(c.Groups))
+	for _, g := range c.Groups {
+		byName[g.Name] = g
+	}
+	next := make([]Group, 0, len(names))
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		g, ok := byName[name]
+		if !ok || seen[name] {
+			return errors.New("排序包含未知分组")
+		}
+		seen[name] = true
+		next = append(next, g)
+	}
+	c.Groups = next
+	return nil
+}
+
 func deleteGroup(c *Config, name string) error {
 	idx := findGroup(c, strings.TrimSpace(name))
 	if idx < 0 {
@@ -236,6 +259,35 @@ func deleteSubGroup(c *Config, group, name string) error {
 	}
 	g := &c.Groups[gi]
 	g.SubGroups = append(g.SubGroups[:si], g.SubGroups[si+1:]...)
+	return nil
+}
+
+func reorderSubGroups(c *Config, group string, names []string) error {
+	group = strings.TrimSpace(group)
+	gi := findGroup(c, group)
+	if gi < 0 {
+		return errors.New("分组不存在")
+	}
+	subs := c.Groups[gi].SubGroups
+	if len(names) != len(subs) {
+		return errors.New("排序不完整")
+	}
+	byName := make(map[string]SubGroup, len(subs))
+	for _, sg := range subs {
+		byName[sg.Name] = sg
+	}
+	next := make([]SubGroup, 0, len(names))
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		sg, ok := byName[name]
+		if !ok || seen[name] {
+			return errors.New("排序包含未知子组")
+		}
+		seen[name] = true
+		next = append(next, sg)
+	}
+	c.Groups[gi].SubGroups = next
 	return nil
 }
 
@@ -957,9 +1009,10 @@ func adminChangePassword(w http.ResponseWriter, r *http.Request) {
 }
 
 type groupBody struct {
-	Name          string `json:"name"`
-	NewName       string `json:"newName"`
-	ManualRefresh bool   `json:"manualRefresh"`
+	Name          string   `json:"name"`
+	NewName       string   `json:"newName"`
+	ManualRefresh bool     `json:"manualRefresh"`
+	Order         []string `json:"order"`
 }
 
 func adminGroups(w http.ResponseWriter, r *http.Request) {
@@ -984,6 +1037,14 @@ func adminGroups(w http.ResponseWriter, r *http.Request) {
 			renameGroupHistory(strings.TrimSpace(body.Name), strings.TrimSpace(newName))
 		}
 		finishChange(w, err, true)
+	case http.MethodPatch:
+		err := updateConfig(func(c *Config) error {
+			return reorderGroups(c, body.Order)
+		})
+		if err == nil {
+			reorderSections(body.Order)
+		}
+		finishChange(w, err, false)
 	case http.MethodDelete:
 		finishChange(w, updateConfig(func(c *Config) error {
 			return deleteGroup(c, body.Name)
@@ -994,11 +1055,12 @@ func adminGroups(w http.ResponseWriter, r *http.Request) {
 }
 
 type subBody struct {
-	Group    string `json:"group"`
-	Name     string `json:"name"`
-	NewName  string `json:"newName"`
-	KumaSlug string `json:"kumaSlug"`
-	Copy     bool   `json:"copy"`
+	Group    string   `json:"group"`
+	Name     string   `json:"name"`
+	NewName  string   `json:"newName"`
+	KumaSlug string   `json:"kumaSlug"`
+	Copy     bool     `json:"copy"`
+	Order    []string `json:"order"`
 }
 
 func adminSubGroups(w http.ResponseWriter, r *http.Request) {
@@ -1027,6 +1089,14 @@ func adminSubGroups(w http.ResponseWriter, r *http.Request) {
 			renameSubHistory(strings.TrimSpace(body.Group), strings.TrimSpace(body.Name), strings.TrimSpace(newName))
 		}
 		finishChange(w, err, true)
+	case http.MethodPatch:
+		err := updateConfig(func(c *Config) error {
+			return reorderSubGroups(c, body.Group, body.Order)
+		})
+		if err == nil {
+			reorderSectionRows(strings.TrimSpace(body.Group), body.Order)
+		}
+		finishChange(w, err, false)
 	case http.MethodDelete:
 		finishChange(w, updateConfig(func(c *Config) error {
 			return deleteSubGroup(c, body.Group, body.Name)
