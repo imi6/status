@@ -245,7 +245,7 @@ function ratioLabel(v){
   return s;
 }
 
-const GRAN_LABEL={hour:'近 24 小时',day:'近 30 天',week:'近 12 周'};
+const GRAN_LABEL={hour:'近 24 小时',day:'近 12 天',week:'近 12 周'};
 const PERIOD_LABEL={hour:'本小时',day:'今日',week:'本周'};
 let _gran=localStorage.getItem('statusGran')||'hour';
 if(!GRAN_LABEL[_gran])_gran='day';

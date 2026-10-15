@@ -34,23 +34,40 @@ func TestBucketPointsHour(t *testing.T) {
 	}
 }
 
-func TestProbeBucketsAreIndividualChecks(t *testing.T) {
+func TestBucketPointsDayIsTwelve(t *testing.T) {
 	now := time.Date(2026, 10, 15, 14, 0, 0, 0, time.UTC)
-	points := []probePoint{
-		{up: true, lat: 1000, ts: now.Add(-30 * time.Minute).Unix()},
-		{up: true, lat: 2000, ts: now.Add(-20 * time.Minute).Unix()},
-		{up: false, lat: 3000, ts: now.Add(-10 * time.Minute).Unix()},
-		{up: true, lat: 4000, ts: now.Add(-25 * time.Hour).Unix()},
-	}
-	buckets := probeBuckets(now, points)
-	if len(buckets) != 3 {
+	buckets := bucketPoints("day", now, []probePoint{{up: true, lat: 1000, ts: now.Add(-2 * time.Hour).Unix()}})
+	if len(buckets) != 12 {
 		t.Fatalf("len %d", len(buckets))
 	}
-	if buckets[0].Start != buckets[0].End || buckets[0].Samples != 1 || buckets[0].Up != 1 {
-		t.Fatalf("first %+v", buckets[0])
+	shown := trimLeadingEmpty(buckets)
+	if len(shown) != 1 || shown[0].Samples != 1 {
+		t.Fatalf("shown %+v", shown)
 	}
-	if buckets[2].Up != 0 || buckets[2].Rate != 0 || buckets[2].Latency != 3000 {
-		t.Fatalf("last %+v", buckets[2])
+	weeks := bucketPoints("week", now, nil)
+	if len(weeks) != 12 {
+		t.Fatalf("weeks %d", len(weeks))
+	}
+	if len(trimLeadingEmpty(weeks)) != 0 {
+		t.Fatal("empty weeks should stay hidden")
+	}
+}
+
+func TestProbeBucketsAreIndividualChecks(t *testing.T) {
+	now := time.Date(2026, 10, 15, 14, 0, 0, 0, time.UTC)
+	points := make([]probePoint, 0, 15)
+	for i := 15; i >= 1; i-- {
+		points = append(points, probePoint{up: i != 1, lat: i * 1000, ts: now.Add(-time.Duration(i) * time.Minute).Unix()})
+	}
+	buckets := probeBuckets(now, points)
+	if len(buckets) != 12 {
+		t.Fatalf("len %d", len(buckets))
+	}
+	if buckets[0].Start != buckets[0].End || buckets[0].Samples != 1 || buckets[0].Latency != 12000 {
+		t.Fatalf("oldest kept %+v", buckets[0])
+	}
+	if buckets[11].Up != 0 || buckets[11].Latency != 1000 {
+		t.Fatalf("latest %+v", buckets[11])
 	}
 }
 
