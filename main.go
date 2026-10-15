@@ -70,20 +70,32 @@ type OverallStatus struct {
 }
 
 type GroupResp struct {
-	Name          string        `json:"name"`
-	SubName       string        `json:"sub_name"`
-	Family        string        `json:"family"`
-	Status        string        `json:"status"`
-	Label         string        `json:"label"`
-	HealthScore   float64       `json:"health_score"`
-	LatencyMs     int           `json:"latency_ms"`
-	LastCheckedAt *time.Time    `json:"last_checked_at,omitempty"`
-	History       []HistoryItem `json:"history"`
+	Name          string                      `json:"name"`
+	SubName       string                      `json:"sub_name"`
+	Family        string                      `json:"family"`
+	Status        string                      `json:"status"`
+	Label         string                      `json:"label"`
+	HealthScore   float64                     `json:"health_score"`
+	LatencyMs     int                         `json:"latency_ms"`
+	LastCheckedAt *time.Time                  `json:"last_checked_at,omitempty"`
+	History       []HistoryItem               `json:"history"`
+	Timelines     map[string][]TimelineBucket `json:"timelines,omitempty"`
 }
 
 type HistoryItem struct {
 	S string  `json:"s"`
 	V float64 `json:"v"`
+	T int64   `json:"t,omitempty"`
+	L int     `json:"l"`
+}
+
+type TimelineBucket struct {
+	Start   int64   `json:"start"`
+	End     int64   `json:"end"`
+	Samples int     `json:"samples"`
+	Up      int     `json:"up"`
+	Rate    float64 `json:"success_rate"`
+	Latency int     `json:"avg_latency_ms"`
 }
 
 // 按外层group.name分组，返回分组列表和该分组下的所有行
@@ -418,7 +430,7 @@ func saveCheck(groupName, subName, modelID string, up bool, latency int) {
 
 func getHistory(groupName, subName, modelID string, limit int) []HistoryItem {
 	rows, err := db.Query(
-		"SELECT up, latency FROM checks WHERE group_name = ? AND sub_name = ? AND model_id = ? ORDER BY checked_at DESC LIMIT ?",
+		"SELECT up, latency, checked_at FROM checks WHERE group_name = ? AND sub_name = ? AND model_id = ? ORDER BY checked_at DESC LIMIT ?",
 		groupName, subName, modelID, limit,
 	)
 	if err != nil {
@@ -429,7 +441,8 @@ func getHistory(groupName, subName, modelID string, limit int) []HistoryItem {
 	for rows.Next() {
 		var up int
 		var lat int
-		rows.Scan(&up, &lat)
+		var ts int64
+		rows.Scan(&up, &lat, &ts)
 		status := "down"
 		v := 0.0
 		if up == 1 {
@@ -444,13 +457,113 @@ func getHistory(groupName, subName, modelID string, limit int) []HistoryItem {
 				v = 0.2
 			}
 		}
-		items = append(items, HistoryItem{S: status, V: v})
+		items = append(items, HistoryItem{S: status, V: v, T: ts, L: lat})
 	}
 	// reverse to chronological order
 	for i, j := 0, len(items)-1; i < j; i, j = i+1, j-1 {
 		items[i], items[j] = items[j], items[i]
 	}
 	return items
+}
+
+type probePoint struct {
+	up  bool
+	lat int
+	ts  int64
+}
+
+func loadProbePoints(groupName, subName, modelID string, since int64) []probePoint {
+	if db == nil {
+		return nil
+	}
+	rows, err := db.Query(
+		`SELECT up, latency, checked_at FROM checks WHERE group_name = ? AND sub_name = ? AND model_id = ? AND checked_at >= ? ORDER BY checked_at`,
+		groupName, subName, modelID, since,
+	)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var points []probePoint
+	for rows.Next() {
+		var up, lat int
+		var ts int64
+		if rows.Scan(&up, &lat, &ts) != nil {
+			continue
+		}
+		points = append(points, probePoint{up: up == 1, lat: lat, ts: ts})
+	}
+	return points
+}
+
+func buildTimelines(groupName, subName, modelID string, now time.Time) map[string][]TimelineBucket {
+	since := now.Add(-84 * 24 * time.Hour).Unix()
+	points := loadProbePoints(groupName, subName, modelID, since)
+	return map[string][]TimelineBucket{
+		"hour": bucketPoints("hour", now, points),
+		"day":  bucketPoints("day", now, points),
+		"week": bucketPoints("week", now, points),
+	}
+}
+
+func bucketPoints(gran string, now time.Time, points []probePoint) []TimelineBucket {
+	loc := now.Location()
+	var n int
+	var step time.Duration
+	var end time.Time
+	switch gran {
+	case "hour":
+		n, step = 24, time.Hour
+		end = now.In(loc).Truncate(time.Hour).Add(time.Hour)
+	case "week":
+		n, step = 12, 7*24*time.Hour
+		end = weekStart(now.In(loc)).Add(step)
+	default:
+		n, step = 30, 24*time.Hour
+		y, m, d := now.In(loc).Date()
+		end = time.Date(y, m, d, 0, 0, 0, 0, loc).Add(24 * time.Hour)
+	}
+	start := end.Add(-time.Duration(n) * step)
+	stepSec := int64(step.Seconds())
+	out := make([]TimelineBucket, n)
+	latSum := make([]int, n)
+	startUnix := start.Unix()
+	endUnix := end.Unix()
+	for i := 0; i < n; i++ {
+		b0 := start.Add(time.Duration(i) * step)
+		out[i] = TimelineBucket{Start: b0.Unix(), End: b0.Add(step).Unix()}
+	}
+	for _, p := range points {
+		if p.ts < startUnix || p.ts >= endUnix {
+			continue
+		}
+		idx := int((p.ts - startUnix) / stepSec)
+		if idx < 0 || idx >= n {
+			continue
+		}
+		out[idx].Samples++
+		if p.up {
+			out[idx].Up++
+		}
+		latSum[idx] += p.lat
+	}
+	for i := range out {
+		if out[i].Samples == 0 {
+			continue
+		}
+		out[i].Rate = float64(out[i].Up) / float64(out[i].Samples) * 100
+		out[i].Latency = latSum[i] / out[i].Samples
+	}
+	return out
+}
+
+func weekStart(t time.Time) time.Time {
+	t = time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
+	wd := int(t.Weekday())
+	if wd == 0 {
+		wd = 7
+	}
+	return t.AddDate(0, 0, -(wd - 1))
 }
 
 func calcHealthScore(groupName, subName, modelID string) float64 {
@@ -492,46 +605,95 @@ func getLastCheck(groupName, subName, modelID string) (bool, int, time.Time) {
 }
 
 func cleanupOld() {
-	// keep last 120 records per sub-group
-	db.Exec(`
-		DELETE FROM checks WHERE id IN (
-			SELECT id FROM checks c1
-			WHERE (
-				SELECT COUNT(*) FROM checks c2
-				WHERE c2.group_name = c1.group_name AND c2.sub_name = c1.sub_name AND c2.model_id = c1.model_id
-			) > 120
-			AND c1.id NOT IN (
-				SELECT id FROM checks c3
-				WHERE c3.group_name = c1.group_name AND c3.sub_name = c1.sub_name AND c3.model_id = c1.model_id
-				ORDER BY c3.checked_at DESC LIMIT 120
-			)
-		)
-	`)
+	cutoff := time.Now().Add(-84 * 24 * time.Hour).Unix()
+	db.Exec(`DELETE FROM checks WHERE checked_at < ?`, cutoff)
 }
 
-// 四种协议的健康检查。请求只生成 1 个 token，必须从正文里读到模型写出的文字才算可用。
+// 探测只发一句短话，并限制回复长度。必须从正文里读到模型写出的文字才算可用。
+const (
+	probePrompt    = "hi"
+	probeMaxTokens = 16
+)
+
+func probeBody(provider, modelID string) ([]byte, error) {
+	switch provider {
+	case "openai-response":
+		return json.Marshal(map[string]any{
+			"model":      modelID,
+			"input":      probePrompt,
+			"max_tokens": probeMaxTokens,
+		})
+	case "google":
+		return json.Marshal(map[string]any{
+			"contents": []map[string]any{
+				{"parts": []map[string]string{{"text": probePrompt}}},
+			},
+			"generationConfig": map[string]int{"maxOutputTokens": probeMaxTokens},
+		})
+	default:
+		return json.Marshal(map[string]any{
+			"model":      modelID,
+			"max_tokens": probeMaxTokens,
+			"messages":   []map[string]string{{"role": "user", "content": probePrompt}},
+		})
+	}
+}
+
 func checkOpenAICompat(m Model) (bool, int) {
-	body := []byte(fmt.Sprintf(`{"model":"%s","messages":[{"role":"user","content":"h"}],"max_tokens":1}`, m.ID))
-	code, resp, lat := doPost(m.BaseURL+"/chat/completions", m.Key, body, m.Timeout)
+	base, ok := readyBase(m)
+	if !ok {
+		return false, 0
+	}
+	body, err := probeBody("openai-compat", m.ID)
+	if err != nil {
+		return false, 0
+	}
+	code, resp, lat := doPost(base+"/chat/completions", m.Key, body, m.Timeout)
 	return code > 0 && code < 300 && openaiCompatHasReply(resp), lat
 }
 
 func checkOpenAIResponse(m Model) (bool, int) {
-	body := []byte(fmt.Sprintf(`{"model":"%s","input":"h","max_tokens":1}`, m.ID))
-	code, resp, lat := doPost(m.BaseURL+"/responses", m.Key, body, m.Timeout)
+	base, ok := readyBase(m)
+	if !ok {
+		return false, 0
+	}
+	body, err := probeBody("openai-response", m.ID)
+	if err != nil {
+		return false, 0
+	}
+	code, resp, lat := doPost(base+"/responses", m.Key, body, m.Timeout)
 	return code > 0 && code < 300 && openaiResponseHasReply(resp), lat
 }
 
 func checkGoogle(m Model) (bool, int) {
-	url := fmt.Sprintf("%s/models/%s:generateContent?key=%s", m.BaseURL, m.ID, m.Key)
-	body := []byte(`{"contents":[{"parts":[{"text":"h"}]}],"generationConfig":{"maxOutputTokens":1}}`)
+	base, ok := readyBase(m)
+	if !ok {
+		return false, 0
+	}
+	url := fmt.Sprintf("%s/models/%s:generateContent?key=%s", base, m.ID, m.Key)
+	body, err := probeBody("google", m.ID)
+	if err != nil {
+		return false, 0
+	}
 	code, resp, lat := doPost(url, "", body, m.Timeout)
 	return code > 0 && code < 300 && googleHasReply(resp), lat
 }
 
+func readyBase(m Model) (string, bool) {
+	base, err := normalizeBaseURL(m.Provider, m.BaseURL)
+	return base, err == nil
+}
+
 func checkAnthropic(m Model) (bool, int) {
-	body := []byte(fmt.Sprintf(`{"model":"%s","max_tokens":1,"messages":[{"role":"user","content":"h"}]}`, m.ID))
-	req, err := http.NewRequest("POST", m.BaseURL+"/messages", bytes.NewReader(body))
+	base, ok := readyBase(m)
+	if !ok {
+		return false, 0
+	}
+	body, err := probeBody("anthropic", m.ID)
+	if err != nil {
+		return false, 0
+	}
+	req, err := http.NewRequest("POST", base+"/messages", bytes.NewReader(body))
 	if err != nil {
 		return false, 0
 	}
@@ -614,7 +776,7 @@ func openaiCompatHasReply(raw []byte) bool {
 	var v struct {
 		Error   json.RawMessage `json:"error"`
 		Choices []struct {
-			Text    string          `json:"text"`
+			Text    string `json:"text"`
 			Message struct {
 				Content json.RawMessage `json:"content"`
 			} `json:"message"`
@@ -752,6 +914,7 @@ func updateRow(gName string, sg SubGroup, m Model, sections *[]Section, up bool,
 		LatencyMs:     lat,
 		LastCheckedAt: &lastAt,
 		History:       hist,
+		Timelines:     buildTimelines(gName, sg.Name, m.ID, time.Now()),
 	}
 
 	mu.Lock()

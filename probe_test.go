@@ -1,11 +1,36 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
+
+func TestBucketPointsHour(t *testing.T) {
+	now := time.Date(2026, 10, 15, 10, 20, 0, 0, time.UTC)
+	hour := now.Truncate(time.Hour)
+	points := []probePoint{
+		{up: true, lat: 1000, ts: hour.Add(10 * time.Minute).Unix()},
+		{up: false, lat: 3000, ts: hour.Add(15 * time.Minute).Unix()},
+	}
+	buckets := bucketPoints("hour", now, points)
+	if len(buckets) != 24 {
+		t.Fatalf("len %d", len(buckets))
+	}
+	last := buckets[23]
+	if last.Samples != 2 || last.Up != 1 || last.Latency != 2000 {
+		t.Fatalf("%+v", last)
+	}
+	if last.Rate < 49.9 || last.Rate > 50.1 {
+		t.Fatalf("rate %v", last.Rate)
+	}
+	if buckets[0].Samples != 0 {
+		t.Fatalf("empty bucket %+v", buckets[0])
+	}
+}
 
 func TestReplyParsersRequireModelText(t *testing.T) {
 	if !openaiCompatHasReply([]byte(`{"choices":[{"message":{"content":"h"}}]}`)) {
@@ -35,7 +60,19 @@ func TestCheckOpenAICompatRequiresModelText(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")
 		if r.URL.Path == "/v1/chat/completions" && r.Header.Get("Authorization") == "Bearer sk" {
-			io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"h"}}]}`)
+			var body struct {
+				Model    string `json:"model"`
+				Messages []struct {
+					Content string `json:"content"`
+				} `json:"messages"`
+				MaxTokens int `json:"max_tokens"`
+			}
+			raw, _ := io.ReadAll(r.Body)
+			if json.Unmarshal(raw, &body) != nil || body.Model != "GPT-PRO" || body.MaxTokens != probeMaxTokens || len(body.Messages) != 1 || body.Messages[0].Content != probePrompt {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"OK"}}]}`)
 			return
 		}
 		w.WriteHeader(http.StatusOK)

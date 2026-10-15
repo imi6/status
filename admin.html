@@ -170,7 +170,7 @@ textarea{min-height:72px;resize:vertical}
             </select>
           </label>
           <label>超时（秒）<input name="timeout" type="number" min="1" max="300" value="30" required></label>
-          <label class="wide">地址<input name="baseURL" required spellcheck="false" placeholder="https://api.example.com/v1"></label>
+          <label class="wide">地址<input name="baseURL" required spellcheck="false" placeholder="https://api.example.com 或 https://api.example.com/v1"></label>
           <label class="wide">密钥
             <span class="keyline">
               <input name="key" type="password" autocomplete="new-password" spellcheck="false">
@@ -186,7 +186,7 @@ textarea{min-height:72px;resize:vertical}
             </span>
           </label>
         </div>
-        <p class="hint">先填地址和密钥，再获取模型。列表来自该地址的 /models，探测使用选中的名称。</p>
+        <p class="hint">网站根地址和带 /v1 的地址都可以。NewAPI、OpenAI 兼容会自动补上 /v1。每次探测向所选模型发送 hi，等它返回文字后才算可用。</p>
         <p class="hint" id="keyHint" hidden>编辑时密钥留空会继续用原来的密钥获取模型。</p>
         <div class="row-actions">
           <button type="submit">保存</button>

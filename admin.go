@@ -234,13 +234,11 @@ func cleanModel(m *Model, prevKey string, creating bool) error {
 	default:
 		return errors.New("不支持的协议")
 	}
-	u, err := url.Parse(m.BaseURL)
-	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
-		return errors.New("地址需以 http:// 或 https:// 开头")
+	base, err := normalizeBaseURL(m.Provider, m.BaseURL)
+	if err != nil {
+		return err
 	}
-	if len(m.BaseURL) > 500 {
-		return errors.New("地址过长")
-	}
+	m.BaseURL = base
 	if m.Key == "" {
 		if creating || prevKey == "" {
 			return errors.New("密钥不能为空")
@@ -978,7 +976,7 @@ func adminUpstreamModels(w http.ResponseWriter, r *http.Request) {
 	}
 	ids, err := listUpstreamModels(body.Provider, body.BaseURL, key)
 	if err != nil {
-		writeAdminJSON(w, 502, map[string]string{"error": err.Error()})
+		writeAdminJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
 	writeAdminJSON(w, 200, map[string]any{"models": ids})
@@ -994,7 +992,7 @@ func listUpstreamModels(provider, baseURL, key string) ([]string, error) {
 	default:
 		return nil, errors.New("不支持的协议")
 	}
-	endpoint, err := upstreamModelsURL(baseURL)
+	endpoint, err := upstreamModelsURL(provider, baseURL)
 	if err != nil {
 		return nil, err
 	}
@@ -1077,19 +1075,64 @@ func listUpstreamModels(provider, baseURL, key string) ([]string, error) {
 	return ids, nil
 }
 
-func upstreamModelsURL(baseURL string) (string, error) {
-	raw := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+func upstreamModelsURL(provider, baseURL string) (string, error) {
+	base, err := normalizeBaseURL(provider, baseURL)
+	if err != nil {
+		return "", err
+	}
+	return base + "/models", nil
+}
+
+func normalizeBaseURL(provider, raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
 	u, err := url.Parse(raw)
 	if err != nil || u.User != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 		return "", errors.New("地址需以 http:// 或 https:// 开头")
 	}
-	if len(raw) > 500 {
-		return "", errors.New("地址过长")
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		provider = "openai-compat"
 	}
-	u.Path = strings.TrimRight(u.Path, "/") + "/models"
+	path := stripAPISuffix(strings.TrimRight(u.Path, "/"))
+	switch provider {
+	case "openai-compat", "openai-response", "anthropic":
+		for strings.HasSuffix(path, "/v1/v1") {
+			path = strings.TrimSuffix(path, "/v1")
+		}
+		if !strings.HasSuffix(path, "/v1") {
+			path += "/v1"
+		}
+	case "google":
+		if path == "" {
+			path = "/v1beta"
+		}
+	default:
+		return "", errors.New("不支持的协议")
+	}
+	u.Path = path
 	u.RawQuery = ""
 	u.Fragment = ""
-	return u.String(), nil
+	out := strings.TrimRight(u.String(), "/")
+	if len(out) > 500 {
+		return "", errors.New("地址过长")
+	}
+	return out, nil
+}
+
+func stripAPISuffix(path string) string {
+	suffixes := []string{"/chat/completions", "/completions", "/responses", "/messages", "/models"}
+	for {
+		changed := false
+		for _, suffix := range suffixes {
+			if strings.HasSuffix(path, suffix) {
+				path = strings.TrimRight(strings.TrimSuffix(path, suffix), "/")
+				changed = true
+			}
+		}
+		if !changed {
+			return path
+		}
+	}
 }
 
 func parseUpstreamModelPage(provider string, raw []byte) (ids []string, hasMore bool, lastID string) {

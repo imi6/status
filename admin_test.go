@@ -239,6 +239,38 @@ func TestListUpstreamModels(t *testing.T) {
 	if _, err := listUpstreamModels("openai-compat", "ftp://example.com", "sk"); err == nil {
 		t.Fatal("expected invalid url")
 	}
+	ids, err = listUpstreamModels("openai-compat", openai.URL, "sk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(ids, ",") != "GPT-PRO,gpt-4o" {
+		t.Fatalf("root url ids = %#v", ids)
+	}
+}
+
+func TestNormalizeBaseURL(t *testing.T) {
+	cases := []struct {
+		provider string
+		in       string
+		want     string
+	}{
+		{"openai-compat", "https://api.example.com", "https://api.example.com/v1"},
+		{"openai-compat", "https://api.example.com/", "https://api.example.com/v1"},
+		{"openai-compat", "https://api.example.com/v1", "https://api.example.com/v1"},
+		{"openai-compat", "https://api.example.com/v1/", "https://api.example.com/v1"},
+		{"openai-compat", "https://api.example.com/v1/models", "https://api.example.com/v1"},
+		{"openai-compat", "https://api.example.com/v1/chat/completions", "https://api.example.com/v1"},
+		{"openai-compat", "https://api.example.com/api", "https://api.example.com/api/v1"},
+		{"anthropic", "https://api.anthropic.com", "https://api.anthropic.com/v1"},
+		{"google", "https://generativelanguage.googleapis.com", "https://generativelanguage.googleapis.com/v1beta"},
+		{"google", "https://generativelanguage.googleapis.com/v1beta", "https://generativelanguage.googleapis.com/v1beta"},
+	}
+	for _, tc := range cases {
+		got, err := normalizeBaseURL(tc.provider, tc.in)
+		if err != nil || got != tc.want {
+			t.Fatalf("%s %s => %q err=%v, want %s", tc.provider, tc.in, got, err, tc.want)
+		}
+	}
 }
 
 func TestAdminPathReplacesDefaultRoute(t *testing.T) {
