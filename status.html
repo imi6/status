@@ -38,14 +38,14 @@ body{
     radial-gradient(900px 450px at 100% 0,rgba(139,92,246,.1),transparent 55%),
     var(--bg);
 }
-.wrap{max-width:1120px;margin:0 auto;padding:0 20px 48px}
+.wrap{max-width:1280px;margin:0 auto;padding:0 20px 48px}
 .site-header{
   position:sticky;top:0;z-index:40;
   background:rgba(255,255,255,.82);
   backdrop-filter:blur(14px);
   border-bottom:1px solid var(--border-soft);
 }
-.site-header .inner{height:62px;display:flex;align-items:center;justify-content:space-between;gap:16px}
+.site-header .inner{height:62px;padding-bottom:0;display:flex;align-items:center;justify-content:space-between;gap:16px}
 .brand{display:flex;align-items:center;gap:12px;min-width:0}
 .logo{
   width:30px;height:30px;border-radius:9px;flex:none;
@@ -88,28 +88,30 @@ body{
 .metric .label{color:var(--faint);font-size:12px;font-weight:600;letter-spacing:.4px}
 .metric .value{font-size:24px;font-weight:680;margin-top:6px;font-variant-numeric:tabular-nums}
 
-.iq{
-  margin-top:16px;padding:12px 16px;border:1px solid var(--border);border-radius:var(--radius);
-  background:var(--panel);box-shadow:var(--shadow);overflow-x:auto;white-space:nowrap;
-  display:flex;align-items:center;gap:14px;
+.group-switch{
+  margin-top:16px;padding:10px 12px;border:1px solid var(--border);border-radius:var(--radius);
+  background:var(--panel);box-shadow:var(--shadow);
+  display:flex;align-items:center;gap:8px;overflow-x:auto;
 }
-.iq-loading{color:var(--faint);font-size:12px}
-.iq-title{font-size:12px;font-weight:700;color:var(--text);flex:none}
-.iq-title small{display:block;font-size:11px;font-weight:500;color:var(--faint)}
-.iq-sep{width:1px;height:28px;background:var(--border);flex:none}
-.iq-group{display:flex;align-items:center;gap:8px;flex:none}
-.iq-model{font-size:12px;font-weight:700;color:var(--dim);background:var(--panel-2);border:1px solid var(--border-soft);border-radius:6px;padding:2px 6px}
-.iq-base{font-size:20px;font-weight:700}
-.iq-tier{display:inline-flex;align-items:baseline;gap:3px}
-.iq-tier-label{font-size:10px;color:var(--faint);font-weight:700}
-.iq-tier-score{font-size:14px;font-weight:700}
+.switch-btn{
+  display:inline-flex;align-items:center;gap:6px;flex:none;
+  border:1px solid var(--border);background:var(--panel-2);color:var(--text);
+  border-radius:999px;padding:6px 12px;cursor:pointer;font:inherit;font-weight:650;font-size:13px;
+}
+.switch-btn.active{background:linear-gradient(135deg,var(--accent),var(--accent-2));color:#fff;border-color:transparent}
+.switch-dot{width:8px;height:8px;border-radius:50%;background:var(--unknown);flex:none}
+.switch-dot.up{background:#16a34a}
+.switch-dot.down{background:#dc2626}
+.switch-dot.degraded{background:#d97706}
+.switch-btn.active .switch-dot{box-shadow:0 0 0 2px rgba(255,255,255,.45)}
 
-.groups{display:flex;flex-direction:column;gap:16px;margin-top:16px}
+.groups{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-top:16px}
 .card{
+  display:flex;flex-direction:column;min-width:0;
   border:1px solid var(--border);border-radius:var(--radius);background:linear-gradient(180deg,var(--panel),#eef1f7);
   box-shadow:var(--shadow);
 }
-.card-head{display:flex;align-items:center;gap:14px;padding:16px 18px}
+.card-head{display:flex;align-items:center;gap:10px;padding:14px 14px 12px}
 .card-title{min-width:0;flex:1}
 .card-title strong{display:block;font-size:15.5px;font-weight:640;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .card-title span{display:block;margin-top:2px;color:var(--faint);font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -127,7 +129,7 @@ body{
 }
 .refresh-btn:hover:not(:disabled){border-color:var(--accent)}
 .refresh-btn:disabled{opacity:.5;cursor:not-allowed}
-.card-body{padding:0 18px 16px}
+.card-body{margin-top:auto;padding:0 14px 14px}
 .track{display:flex;align-items:stretch;gap:2px;height:34px}
 .seg{position:relative;flex:1 1 0;min-width:2px;height:100%;border-radius:3px;background:var(--unknown);cursor:pointer}
 .seg::after{content:"";position:absolute;left:-1px;right:-1px;top:-8px;bottom:-8px}
@@ -144,9 +146,9 @@ body{
 .card-head{cursor:pointer}
 .chev{color:var(--faint);font-size:12px;transition:transform .2s}
 .card.open .chev{transform:rotate(90deg)}
-.card-detail{display:none;padding:0 18px 16px;color:var(--dim);font-size:13px}
+.card-detail{display:none;padding:0 14px 14px;color:var(--dim);font-size:13px}
 .card.open .card-detail{display:block}
-.detail-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .detail-grid div{background:var(--panel-2);border:1px solid var(--border-soft);border-radius:8px;padding:10px 12px}
 .detail-grid span{display:block;color:var(--faint);font-size:11px}
 .detail-grid b{font-weight:650;font-variant-numeric:tabular-nums}
@@ -157,14 +159,18 @@ body{
   box-shadow:0 6px 24px rgba(23,43,77,.14);max-width:280px;
 }
 .seg-tip b{display:block;margin-bottom:4px}
-.empty{padding:48px 20px;text-align:center;color:var(--faint);border:1px dashed var(--border);border-radius:var(--radius);background:var(--panel)}
+.empty{grid-column:1 / -1;padding:48px 20px;text-align:center;color:var(--faint);border:1px dashed var(--border);border-radius:var(--radius);background:var(--panel)}
 .footer{margin-top:28px;text-align:center;color:var(--faint);font-size:12.5px}
 .footer a{color:var(--dim)}
+@media(max-width:1100px){
+  .groups{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
 @media(max-width:800px){
-  .metrics,.detail-grid{grid-template-columns:1fr 1fr}
+  .groups{grid-template-columns:1fr}
+  .metrics{grid-template-columns:1fr 1fr}
   .card-head{flex-wrap:wrap}
   .stat{text-align:left}
-  .site-header .inner{height:auto;padding:12px 0;flex-wrap:wrap}
+  .site-header .inner{height:auto;padding:12px 20px;flex-wrap:wrap}
   .header-actions{width:100%;justify-content:space-between}
 }
 </style>
@@ -208,7 +214,7 @@ body{
     </div>
   </section>
 
-  <section class="iq" id="iqMonitor"><span class="iq-loading">GPT 智商加载中...</span></section>
+  <section class="group-switch" id="groupSwitch" hidden></section>
   <section class="groups" id="app"><div class="empty">正在读取状态...</div></section>
   <div class="footer" id="pageFooter"></div>
 </main>
@@ -271,6 +277,34 @@ function segTipText(el){
   const delay=lat?(lat/1000).toFixed(2)+'s':'无延迟';
   return '<b>'+fmtTimeFull(start*1000)+' – '+fmtTimeFull(end*1000)+'</b><div>成功率 '+rate.toFixed(1)+'%</div><div>采样 '+up+'/'+samples+'</div><div>平均延迟 '+delay+'</div>';
 }
+let _group=localStorage.getItem('statusGroup')||'';
+function sectionStatus(sec){
+  const rows=sec.rows||[];
+  if(!rows.length)return 'unknown';
+  if(rows.some(r=>r.status==='down'))return 'down';
+  if(rows.some(r=>r.status==='degraded'))return 'degraded';
+  if(rows.every(r=>r.status==='up'))return 'up';
+  return 'unknown';
+}
+function visibleSections(sections){
+  if(!_group)return sections||[];
+  return (sections||[]).filter(sec=>sec.name===_group);
+}
+function renderGroupSwitch(sections){
+  const el=document.getElementById('groupSwitch');
+  const names=(sections||[]).map(sec=>sec.name).filter(Boolean);
+  if(_group&&names.indexOf(_group)<0)_group='';
+  if(!names.length){el.hidden=true;el.innerHTML='';return;}
+  const btn=(name,label,status)=>{
+    const active=(_group||'')===name?' active':'';
+    const dot=status?'<span class="switch-dot '+status+'"></span>':'';
+    return '<button type="button" class="switch-btn'+active+'" data-group="'+escapeHtml(name)+'">'+dot+escapeHtml(label)+'</button>';
+  };
+  let html=btn('','全部','');
+  for(const sec of sections)html+=btn(sec.name,sec.name,sectionStatus(sec));
+  el.hidden=false;
+  el.innerHTML=html;
+}
 function summarize(sections){
   const rows=[];
   for(const sec of sections||[])for(const r of sec.rows||[])rows.push(r);
@@ -298,12 +332,15 @@ function render(data){
   _lastData=data;
   document.title=data.title||_frontendTitle;
   const sections=Array.isArray(data.sections)?data.sections:[];
+  renderGroupSwitch(sections);
+  const shown=visibleSections(sections);
   const overall=data.overall||{status:'unknown',label:'采样中'};
-  const summary=summarize(sections);
+  const summary=summarize(shown);
   const dot=document.getElementById('summaryDot');
   dot.className='big-dot '+(overall.status||'unknown');
   document.getElementById('summary').textContent=overall.label+(data.checking?' · 检测中':'');
-  document.getElementById('ovSub').textContent=summary.count+' 个分组 · '+GRAN_LABEL[_gran]+'统计'+(data.last_completed_at?' · 最近检测 '+elapsed(data.last_completed_at):'');
+  const scope=_group?_group+' · ':'';
+  document.getElementById('ovSub').textContent=scope+summary.count+' 个分组 · '+GRAN_LABEL[_gran]+'统计'+(data.last_completed_at?' · 最近检测 '+elapsed(data.last_completed_at):'');
   document.getElementById('score').textContent=summary.score;
   document.getElementById('mGroups').textContent=String(summary.count);
   document.getElementById('mLatency').textContent=summary.latency;
@@ -316,10 +353,10 @@ function render(data){
   }
   updateRefreshButtons();
 
-  if(!sections.length){document.getElementById('app').innerHTML='<div class="empty">暂无可展示分组</div>';return;}
+  if(!shown.length){document.getElementById('app').innerHTML='<div class="empty">'+(_group?'这个分组暂无检测项':'暂无可展示分组')+'</div>';return;}
 
   let output='';
-  for(const sec of sections){
+  for(const sec of shown){
     const rows=sec.rows||[];
     if(!rows.length)continue;
     const canRefresh=_manualRefreshGroups.has(sec.name);
@@ -382,8 +419,6 @@ async function start(){
   await initFrontend();
   load();
   setInterval(load,20000);
-  loadIq();
-  setInterval(loadIq,60000);
 }
 
 function manualRefresh(btn){
@@ -433,47 +468,13 @@ function updateRefreshButtons(){
     }
   });
 }
-const IQ_API='/api/iq';
-const IQ_LAYOUT=[
-  {model:'gpt-5.6-sol',name:'SOL',tiers:['ultra','max','xhigh']},
-  {model:'gpt-5.6-terra',name:'TERRA',tiers:['ultra','max','xhigh']},
-  {model:'gpt-5.6-luna',name:'LUNA',tiers:['max','xhigh','high']},
-  {model:'gpt-5.5',name:'5.5',tiers:['xhigh','high']},
-];
-const IQ_TIER_LABEL={low:'LOW',medium:'MED',high:'HIGH',max:'MAX',ultra:'ULTRA',xhigh:'XHIGH'};
-function iqLatestScore(data,key){
-  const arr=data[key];
-  if(!Array.isArray(arr)||!arr.length)return null;
-  const v=arr[arr.length-1];
-  return Number.isFinite(Number(v&&v.score))?Number(v.score):null;
-}
-function renderIq(data){
-  const el=document.getElementById('iqMonitor');
-  if(!el)return;
-  let html='<div class="iq-title">GPT 实时智商<small>codexradar</small></div><div class="iq-sep"></div>';
-  for(const g of IQ_LAYOUT){
-    const base=iqLatestScore(data,g.model);
-    const parts=[];
-    if(base!==null)parts.push('<span class="iq-base">'+base.toFixed(0)+'</span>');
-    for(const t of g.tiers){
-      const s=iqLatestScore(data,g.model+'@'+t);
-      if(s===null)continue;
-      parts.push('<span class="iq-tier"><span class="iq-tier-label">'+(IQ_TIER_LABEL[t]||t.toUpperCase())+'</span><span class="iq-tier-score">'+s.toFixed(0)+'</span></span>');
-    }
-    if(!parts.length)continue;
-    html+='<div class="iq-group"><span class="iq-model">'+g.name+'</span>'+parts.join('')+'</div><div class="iq-sep"></div>';
-  }
-  el.innerHTML=html;
-}
-async function loadIq(){
-  try{
-    const res=await fetch(IQ_API,{cache:'no-store'});
-    renderIq(await res.json());
-  }catch(err){
-    const el=document.getElementById('iqMonitor');
-    if(el&&el.children.length<2)el.innerHTML='<span class="iq-loading">GPT 智商获取失败</span>';
-  }
-}
+document.getElementById('groupSwitch').addEventListener('click',ev=>{
+  const btn=ev.target.closest('.switch-btn');
+  if(!btn)return;
+  _group=btn.dataset.group||'';
+  localStorage.setItem('statusGroup',_group);
+  if(_lastData)render(_lastData);
+});
 document.getElementById('granPicker').querySelectorAll('button').forEach(btn=>{
   btn.classList.toggle('active',btn.dataset.gran===_gran);
   btn.addEventListener('click',()=>{
