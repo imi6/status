@@ -117,7 +117,7 @@ body{min-height:100vh;background:var(--bg)}
 .refresh-btn:disabled{opacity:.5;cursor:not-allowed}
 .card-body{margin-top:auto;padding:0 14px 14px}
 .track{display:flex;align-items:stretch;gap:2px;height:34px}
-.seg{position:relative;flex:1 1 0;min-width:2px;height:100%;border-radius:3px;background:var(--unknown);cursor:pointer}
+.seg{position:relative;flex:1 1 0;min-width:0;height:100%;border-radius:3px;background:var(--unknown);cursor:pointer}
 .seg::after{content:"";position:absolute;left:-1px;right:-1px;top:-8px;bottom:-8px}
 .seg.up,.seg.u-100{background:linear-gradient(180deg,#34e373,#16a34a)}
 .seg.u-99{background:linear-gradient(180deg,#6ee787,#22c55e)}
@@ -276,6 +276,16 @@ function windowStats(buckets){
   }
   return {samples,up,rate:samples?up/samples*100:null,latency:samples?lat/samples:0};
 }
+function barBuckets(g){
+  const all=g.timelines||{};
+  if(_gran==='hour')return all.probe||[];
+  return all[_gran]||[];
+}
+function bucketEndMs(b){
+  const start=Number(b.start)||0;
+  const end=Number(b.end)||0;
+  return (end&&end!==start?end:start)*1000;
+}
 function periodStats(buckets){
   const list=buckets||[];
   const last=list.length?list[list.length-1]:null;
@@ -296,6 +306,9 @@ function segTipText(el){
   const rate=Number(el.dataset.rate)||0;
   const lat=Number(el.dataset.l)||0;
   const delay=lat?(lat/1000).toFixed(2)+'s':'无延迟';
+  if(start===end){
+    return '<b>'+fmtTimeFull(start*1000)+'</b><div>本次检测 '+(up?'成功':'失败')+'</div><div>延迟 '+delay+'</div>';
+  }
   return '<b>'+fmtTimeFull(start*1000)+' – '+fmtTimeFull(end*1000)+'</b><div>成功率 '+rate.toFixed(1)+'%</div><div>采样 '+up+'/'+samples+'</div><div>平均延迟 '+delay+'</div>';
 }
 let _group=localStorage.getItem('statusGroup')||'';
@@ -422,6 +435,7 @@ function render(data){
     for(const g of rows){
       const status=g.status||'unknown';
       const buckets=(g.timelines||{})[_gran]||[];
+      const bars=barBuckets(g);
       const win=windowStats(buckets);
       const cur=periodStats(buckets);
       const latency=g.latency_ms?(g.latency_ms/1000).toFixed(2)+'s':'无延迟样本';
@@ -433,8 +447,8 @@ function render(data){
       const rate=win.rate==null?'--':win.rate.toFixed(1)+'%';
       const winLat=win.samples?(win.latency/1000).toFixed(2)+'s':'--';
       const key=groupName+'|'+(g.sub_name||'')+'|'+(g.name||'');
-      const axis=buckets.length?'<div class="time-row"><span>'+fmtAxis(buckets[0].start*1000)+'</span><span>'+fmtAxis(buckets[Math.floor(buckets.length/2)].start*1000)+'</span><span>'+fmtAxis(buckets[buckets.length-1].end*1000)+'</span></div>':'';
-      output+='<article class="card" data-key="'+escapeHtml(key)+'"><div class="card-head"><span class="big-dot '+status+'"></span><div class="card-title"><div class="name-row"><strong title="'+escapeHtml(cardTitle)+'">'+escapeHtml(cardTitle)+'</strong>'+ratioHtml+'</div><span>'+(g.label||'采样中')+' · '+latency+'</span></div><div class="stat"><span class="k">'+(PERIOD_LABEL[_gran]||'当前')+'</span><span class="v">'+curRate+'</span></div><span class="badge '+status+'">'+(g.label||'采样中')+'</span>'+refreshBtn+'</div><div class="card-body"><div class="track">'+timelineHtml(buckets)+'</div>'+axis+'</div></article>';
+      const axis=bars.length?'<div class="time-row"><span>'+fmtAxis(bars[0].start*1000)+'</span><span>'+fmtAxis(bars[Math.floor(bars.length/2)].start*1000)+'</span><span>'+fmtAxis(bucketEndMs(bars[bars.length-1]))+'</span></div>':'';
+      output+='<article class="card" data-key="'+escapeHtml(key)+'"><div class="card-head"><span class="big-dot '+status+'"></span><div class="card-title"><div class="name-row"><strong title="'+escapeHtml(cardTitle)+'">'+escapeHtml(cardTitle)+'</strong>'+ratioHtml+'</div><span>'+(g.label||'采样中')+' · '+latency+'</span></div><div class="stat"><span class="k">'+(PERIOD_LABEL[_gran]||'当前')+'</span><span class="v">'+curRate+'</span></div><span class="badge '+status+'">'+(g.label||'采样中')+'</span>'+refreshBtn+'</div><div class="card-body"><div class="track">'+timelineHtml(bars)+'</div>'+axis+'</div></article>';
     }
   }
   document.getElementById('app').innerHTML=output;

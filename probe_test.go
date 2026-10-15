@@ -34,6 +34,26 @@ func TestBucketPointsHour(t *testing.T) {
 	}
 }
 
+func TestProbeBucketsAreIndividualChecks(t *testing.T) {
+	now := time.Date(2026, 10, 15, 14, 0, 0, 0, time.UTC)
+	points := []probePoint{
+		{up: true, lat: 1000, ts: now.Add(-30 * time.Minute).Unix()},
+		{up: true, lat: 2000, ts: now.Add(-20 * time.Minute).Unix()},
+		{up: false, lat: 3000, ts: now.Add(-10 * time.Minute).Unix()},
+		{up: true, lat: 4000, ts: now.Add(-25 * time.Hour).Unix()},
+	}
+	buckets := probeBuckets(now, points)
+	if len(buckets) != 3 {
+		t.Fatalf("len %d", len(buckets))
+	}
+	if buckets[0].Start != buckets[0].End || buckets[0].Samples != 1 || buckets[0].Up != 1 {
+		t.Fatalf("first %+v", buckets[0])
+	}
+	if buckets[2].Up != 0 || buckets[2].Rate != 0 || buckets[2].Latency != 3000 {
+		t.Fatalf("last %+v", buckets[2])
+	}
+}
+
 func TestReplyParsersRequireModelText(t *testing.T) {
 	if !openaiCompatHasReply([]byte(`{"choices":[{"message":{"content":"h"}}]}`)) {
 		t.Fatal("openai content")

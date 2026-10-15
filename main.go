@@ -556,10 +556,38 @@ func buildTimelines(groupName, subName, modelID string, now time.Time) map[strin
 	since := now.Add(-84 * 24 * time.Hour).Unix()
 	points := loadProbePoints(groupName, subName, modelID, since)
 	return map[string][]TimelineBucket{
-		"hour": bucketPoints("hour", now, points),
-		"day":  bucketPoints("day", now, points),
-		"week": bucketPoints("week", now, points),
+		"hour":  bucketPoints("hour", now, points),
+		"probe": probeBuckets(now, points),
+		"day":   bucketPoints("day", now, points),
+		"week":  bucketPoints("week", now, points),
 	}
+}
+
+// probeBuckets 近 24 小时里每次检测单独一格，不按整点合并。
+func probeBuckets(now time.Time, points []probePoint) []TimelineBucket {
+	since := now.Add(-24 * time.Hour).Unix()
+	until := now.Unix()
+	out := make([]TimelineBucket, 0, len(points))
+	for _, p := range points {
+		if p.ts < since || p.ts > until {
+			continue
+		}
+		up := 0
+		rate := 0.0
+		if p.up {
+			up = 1
+			rate = 100
+		}
+		out = append(out, TimelineBucket{
+			Start:   p.ts,
+			End:     p.ts,
+			Samples: 1,
+			Up:      up,
+			Rate:    rate,
+			Latency: p.lat,
+		})
+	}
+	return out
 }
 
 func bucketPoints(gran string, now time.Time, points []probePoint) []TimelineBucket {
