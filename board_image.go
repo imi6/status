@@ -10,6 +10,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -452,9 +453,78 @@ func loadBoardFont() (*opentype.Font, error) {
 
 func parseBoardFont(data []byte) (*opentype.Font, error) {
 	if col, err := opentype.ParseCollection(data); err == nil && col.NumFonts() > 0 {
-		return col.Font(0)
+		if f, err := col.Font(0); err == nil {
+			return f, nil
+		}
 	}
-	return opentype.Parse(data)
+	if f, err := opentype.Parse(data); err == nil {
+		return f, nil
+	}
+	fixed, err := alignedSFNT(data)
+	if err != nil {
+		return nil, err
+	}
+	return opentype.Parse(fixed)
+}
+
+// alignedSFNT 取出字体集里的第一个字体，按 4 字节对齐重排各张表。
+// wqy-zenhei 等字体的表偏移没有对齐，x/image 会拒绝解析。
+func alignedSFNT(data []byte) ([]byte, error) {
+	bad := errors.New("字体文件格式不支持")
+	u16 := func(at int) int { return int(data[at])<<8 | int(data[at+1]) }
+	u32 := func(at int) int {
+		return int(data[at])<<24 | int(data[at+1])<<16 | int(data[at+2])<<8 | int(data[at+3])
+	}
+	if len(data) < 12 {
+		return nil, bad
+	}
+	base := 0
+	if string(data[:4]) == "ttcf" {
+		if len(data) < 16 || u32(8) < 1 {
+			return nil, bad
+		}
+		base = u32(12)
+	}
+	if base < 0 || base+12 > len(data) {
+		return nil, bad
+	}
+	numTables := u16(base + 4)
+	dirEnd := base + 12 + numTables*16
+	if numTables == 0 || numTables > 200 || dirEnd > len(data) {
+		return nil, bad
+	}
+	type table struct {
+		rec       []byte
+		off, size int
+	}
+	tables := make([]table, 0, numTables)
+	for i := 0; i < numTables; i++ {
+		at := base + 12 + i*16
+		off, size := u32(at+8), u32(at+12)
+		if off < 0 || size < 0 || off+size > len(data) {
+			return nil, bad
+		}
+		tables = append(tables, table{rec: data[at : at+16], off: off, size: size})
+	}
+	sort.Slice(tables, func(i, j int) bool { return string(tables[i].rec[:4]) < string(tables[j].rec[:4]) })
+
+	headLen := 12 + numTables*16
+	total := headLen
+	for _, t := range tables {
+		total += (t.size + 3) &^ 3
+	}
+	out := make([]byte, total)
+	copy(out, data[base:base+12])
+	pos := headLen
+	for i, t := range tables {
+		rec := out[12+i*16 : 12+i*16+16]
+		copy(rec, t.rec[:8])
+		rec[8], rec[9], rec[10], rec[11] = byte(pos>>24), byte(pos>>16), byte(pos>>8), byte(pos)
+		copy(rec[12:], t.rec[12:16])
+		copy(out[pos:], data[t.off:t.off+t.size])
+		pos += (t.size + 3) &^ 3
+	}
+	return out, nil
 }
 
 func boardFontPath() (string, error) {

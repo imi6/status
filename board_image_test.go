@@ -8,9 +8,12 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/image/font/opentype"
 )
 
 func TestChunkBoardCards(t *testing.T) {
@@ -57,6 +60,29 @@ func TestRenderStatusBoard(t *testing.T) {
 	cards := buildBoardCards(sections)
 	if cards[0].ratio != "0.09x" || cards[0].rate != "50%" || cards[0].dots[10] != 2 || cards[0].dots[11] != 0 {
 		t.Fatalf("card %+v", cards[0])
+	}
+}
+
+func TestParseUnalignedFont(t *testing.T) {
+	path := os.Getenv("BOARD_FONT")
+	if path == "" {
+		t.Skip("BOARD_FONT not set")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := parseBoardFont(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	face, err := opentype.NewFace(f, &opentype.FaceOptions{Size: 24, DPI: 72})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeFace(face)
+	if textWidth(face, "正常 成功率") <= 0 {
+		t.Fatal("zero width")
 	}
 }
 
