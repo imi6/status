@@ -246,7 +246,7 @@ function ratioLabel(v){
 }
 
 const GRAN_LABEL={hour:'近 24 小时',day:'近 12 天',week:'近 12 周'};
-const PERIOD_LABEL={hour:'本小时',day:'今日',week:'本周'};
+const PERIOD_LABEL={hour:'近 12 次',day:'今日',week:'本周'};
 let _gran=localStorage.getItem('statusGran')||'hour';
 if(!GRAN_LABEL[_gran])_gran='day';
 let _lastData=null;
@@ -367,6 +367,10 @@ function renderGroupSwitch(sections){
   el.hidden=false;
   el.innerHTML=html;
 }
+function currentStats(g){
+  if(_gran==='hour')return windowStats(barBuckets(g));
+  return periodStats((g.timelines||{})[_gran]);
+}
 function summarize(sections){
   const rows=[];
   for(const sec of sections||[])for(const r of sec.rows||[])rows.push(r);
@@ -377,7 +381,7 @@ function summarize(sections){
     samples+=st.samples;
     up+=st.up;
     lat+=st.latency*st.samples;
-    const cur=periodStats(buckets);
+    const cur=currentStats(g);
     curSamples+=cur.samples;
     curUp+=cur.up;
   }
@@ -437,7 +441,7 @@ function render(data){
       const buckets=(g.timelines||{})[_gran]||[];
       const bars=barBuckets(g);
       const win=windowStats(buckets);
-      const cur=periodStats(buckets);
+      const cur=currentStats(g);
       const latency=g.latency_ms?(g.latency_ms/1000).toFixed(2)+'s':'无延迟样本';
       const groupName=sec.name||g.sub_name||'';
       const cardTitle=g.sub_name||groupName;
