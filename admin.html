@@ -6,16 +6,15 @@
 <title>管理后台</title>
 <style>
 :root{
-  --bg:#f4f6fb;
+  --bg:#f3f4f6;
   --panel:#fff;
-  --panel-2:#f7f9fc;
-  --border:#dde3ee;
-  --border-soft:#e8ecf4;
-  --text:#1a2233;
-  --dim:#5c6880;
-  --faint:#8a95ab;
-  --accent:#6366f1;
-  --accent-2:#8b5cf6;
+  --panel-2:#f7f8fa;
+  --border:#e5e7eb;
+  --border-soft:#eef0f3;
+  --text:#1c2430;
+  --dim:#5b6573;
+  --faint:#8b93a1;
+  --accent:#1c2430;
   --ok:#15803d;
   --down:#dc2626;
   --down-soft:rgba(220,38,38,.1);
@@ -25,13 +24,7 @@
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:14px;line-height:1.55}
-body{
-  min-height:100vh;
-  background:
-    radial-gradient(1100px 500px at 15% -10%,rgba(99,102,241,.12),transparent 60%),
-    radial-gradient(900px 450px at 100% 0,rgba(139,92,246,.1),transparent 55%),
-    var(--bg);
-}
+body{min-height:100vh;background:var(--bg)}
 .wrap{max-width:980px;margin:0 auto;padding:28px 20px 48px}
 h1{font-size:22px;font-weight:680}
 .lead{margin-top:4px;color:var(--dim);font-size:13px}
@@ -39,7 +32,7 @@ h1{font-size:22px;font-weight:680}
 .links{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 a.btn,button{
   font:inherit;font-weight:650;font-size:13px;
-  background:linear-gradient(135deg,var(--accent),var(--accent-2));color:#fff;
+  background:var(--accent);color:#fff;
   border:1px solid transparent;border-radius:8px;
   padding:7px 14px;cursor:pointer;text-decoration:none;display:inline-block;
 }
@@ -50,7 +43,7 @@ button:disabled{background:#e8ecf4;color:var(--faint);cursor:not-allowed}
 .msg{margin:12px 0;padding:10px 12px;border:1px solid rgba(21,128,61,.28);border-radius:10px;font-size:13px;background:rgba(21,128,61,.08);color:var(--ok)}
 .msg.err{background:var(--down-soft);border-color:rgba(220,38,38,.28);color:var(--down)}
 .card{
-  border:1px solid var(--border);border-radius:var(--radius);background:linear-gradient(180deg,var(--panel),#eef1f7);
+  border:1px solid var(--border);border-radius:var(--radius);background:var(--panel);
   box-shadow:var(--shadow);padding:18px;margin-top:16px;
 }
 .card h2{font-size:15px;font-weight:680;margin-bottom:14px}
@@ -62,7 +55,7 @@ input,select,textarea{
   font:14px/1.4 var(--font);color:var(--text);
   border:1px solid var(--border);border-radius:8px;padding:8px 10px;background:#fff;width:100%;
 }
-input:focus,select:focus,textarea:focus{outline:2px solid rgba(99,102,241,.25);border-color:var(--accent)}
+input:focus,select:focus,textarea:focus{outline:2px solid rgba(28,36,48,.16);border-color:var(--accent)}
 textarea{min-height:72px;resize:vertical}
 .row-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;align-items:center}
 .hint{color:var(--faint);font-size:12px;margin-top:8px}
@@ -82,7 +75,7 @@ textarea{min-height:72px;resize:vertical}
 .model span{color:var(--dim);font-size:12px}
 .login{max-width:420px;margin:48px auto}
 #login,#disabled{
-  background:linear-gradient(180deg,var(--panel),#eef1f7);
+  background:var(--panel);
   border:1px solid var(--border);border-radius:var(--radius);
   box-shadow:var(--shadow);padding:28px 24px;
 }
@@ -134,6 +127,7 @@ textarea{min-height:72px;resize:vertical}
           <label>标题<input name="title" required></label>
           <label>副标题<input name="subtitle"></label>
           <label class="wide">图标地址<input name="icon" spellcheck="false"></label>
+          <label class="wide">默认接口地址<input name="defaultBaseURL" spellcheck="false" placeholder="https://zzshu.cc"></label>
           <label>检测间隔（秒）<input name="interval" type="number" min="5" max="86400" required></label>
           <label>手动刷新冷却（秒）<input name="cooldown" type="number" min="5" max="86400" required></label>
           <label>监听端口<input name="port" type="number" min="1" max="65535" required></label>
@@ -142,7 +136,7 @@ textarea{min-height:72px;resize:vertical}
           <label>Kuma Slug<input name="kumaSlug" spellcheck="false"></label>
           <label class="wide">页脚 HTML<textarea name="footer"></textarea></label>
         </div>
-        <p class="hint">后台路径就是地址里的目录名，不要用 admin 这种常见词。修改路径或端口后需要重启进程。状态页不会显示这个入口。</p>
+        <p class="hint">后台路径就是地址里的目录名，不要用 admin 这种常见词。修改路径或端口后需要重启进程。状态页不会显示这个入口。默认接口地址会填进新建模型，留空则使用 https://zzshu.cc。</p>
         <div class="row-actions"><button type="submit">保存站点设置</button></div>
       </form>
     </section>
@@ -199,7 +193,7 @@ textarea{min-height:72px;resize:vertical}
             </select>
           </label>
           <label>超时（秒）<input name="timeout" type="number" min="1" max="300" value="30" required></label>
-          <label class="wide">地址<input name="baseURL" required spellcheck="false" placeholder="https://api.example.com 或 https://api.example.com/v1"></label>
+          <label class="wide">地址<input name="baseURL" spellcheck="false" placeholder="https://zzshu.cc"></label>
           <label class="wide">密钥
             <span class="keyline">
               <input name="key" type="password" autocomplete="new-password" spellcheck="false">
@@ -215,7 +209,7 @@ textarea{min-height:72px;resize:vertical}
             </span>
           </label>
         </div>
-        <p class="hint">网站根地址和带 /v1 的地址都可以。NewAPI、OpenAI 兼容会自动补上 /v1。每次探测向所选模型发送 hi，等它返回文字后才算可用。</p>
+        <p class="hint">地址留空时使用上面的默认接口地址。网站根地址和带 /v1 的地址都可以，NewAPI、OpenAI 兼容会自动补上 /v1。每次探测向所选模型发送 hi，等它返回文字后才算可用。</p>
         <p class="hint" id="keyHint" hidden>编辑时密钥留空会继续用原来的密钥获取模型。</p>
         <div class="row-actions">
           <button type="submit">保存</button>
@@ -276,6 +270,7 @@ function fillSettings(){
   f.subtitle.value = front.subtitle || '';
   f.icon.value = front.icon || '';
   f.footer.value = front.footer || '';
+  f.defaultBaseURL.value = state.defaultBaseURL || 'https://zzshu.cc';
   f.interval.value = state.interval || 60;
   f.cooldown.value = state.manualRefreshCooldown || 60;
   f.port.value = state.port || 8080;
@@ -342,6 +337,7 @@ $('settingsForm').addEventListener('submit', async (e) => {
       interval: Number(f.interval.value),
       manualRefreshCooldown: Number(f.cooldown.value),
       frontend: {title:f.title.value, subtitle:f.subtitle.value, icon:f.icon.value, footer:f.footer.value},
+      defaultBaseURL: f.defaultBaseURL.value,
       kuma: {baseURL:f.kumaBase.value, slug:f.kumaSlug.value}
     }});
     await reload('站点设置已保存。');
@@ -514,7 +510,7 @@ $('groups').addEventListener('click', (e) => {
     $('keyHint').hidden = true;
     resetModelSelect('');
     f.provider.value = 'openai-compat';
-    f.baseURL.value = '';
+    f.baseURL.value = (state && state.defaultBaseURL) || 'https://zzshu.cc';
     f.key.value = '';
     f.key.type = 'password';
     $('toggleKey').textContent = '显示';

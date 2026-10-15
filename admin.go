@@ -212,10 +212,16 @@ func deleteSubGroup(c *Config, group, name string) error {
 	return nil
 }
 
-func cleanModel(m *Model, prevKey string, creating bool) error {
+func cleanModel(m *Model, prevKey string, creating bool, defaultBase string) error {
 	m.ID = strings.TrimSpace(m.ID)
 	m.Provider = strings.TrimSpace(m.Provider)
 	m.BaseURL = strings.TrimRight(strings.TrimSpace(m.BaseURL), "/")
+	if m.BaseURL == "" {
+		m.BaseURL = strings.TrimSpace(defaultBase)
+	}
+	if m.BaseURL == "" {
+		m.BaseURL = "https://zzshu.cc"
+	}
 	m.Key = strings.TrimSpace(m.Key)
 	if m.ID == "" {
 		return errors.New("模型 ID 不能为空")
@@ -294,7 +300,7 @@ func addModel(c *Config, group, sub string, m Model) error {
 	if si < 0 {
 		return errors.New("子组不存在")
 	}
-	if err := cleanModel(&m, "", true); err != nil {
+	if err := cleanModel(&m, "", true, c.DefaultBaseURL); err != nil {
 		return err
 	}
 	if hasModelID(c.Groups[gi].SubGroups[si], m.ID, -1) {
@@ -310,7 +316,7 @@ func updateModel(c *Config, group, sub string, index int, m Model) error {
 		return err
 	}
 	prev := cur.Key
-	if err := cleanModel(&m, prev, false); err != nil {
+	if err := cleanModel(&m, prev, false, c.DefaultBaseURL); err != nil {
 		return err
 	}
 	gi := findGroup(c, strings.TrimSpace(group))
@@ -379,7 +385,7 @@ func serveAdminPage(w http.ResponseWriter, r *http.Request) {
 	serveAsset(w, r, "admin.html")
 }
 
-func applySettings(c *Config, port, interval, cooldown int, adminPath string, front FrontendConfig, kuma KumaConfig) error {
+func applySettings(c *Config, port, interval, cooldown int, adminPath, defaultBase string, front FrontendConfig, kuma KumaConfig) error {
 	if port < 1 || port > 65535 {
 		return errors.New("端口需在 1 到 65535")
 	}
@@ -408,10 +414,15 @@ func applySettings(c *Config, port, interval, cooldown int, adminPath string, fr
 	if err != nil {
 		return err
 	}
+	base, err := cleanDefaultBase(defaultBase)
+	if err != nil {
+		return err
+	}
 	c.Port = port
 	c.Interval = interval
 	c.ManualRefreshCooldown = cooldown
 	c.AdminPath = pathName
+	c.DefaultBaseURL = base
 	c.Frontend = front
 	c.Kuma = kuma
 	return nil
@@ -755,6 +766,7 @@ type adminConfigView struct {
 	Interval              int            `json:"interval"`
 	ManualRefreshCooldown int            `json:"manualRefreshCooldown"`
 	AdminPath             string         `json:"adminPath"`
+	DefaultBaseURL        string         `json:"defaultBaseURL"`
 	Frontend              FrontendConfig `json:"frontend"`
 	Kuma                  KumaConfig     `json:"kuma"`
 	Groups                []Group        `json:"groups"`
@@ -767,6 +779,7 @@ func adminGetConfig(w http.ResponseWriter, r *http.Request) {
 		Interval:              cfg.Interval,
 		ManualRefreshCooldown: cfg.ManualRefreshCooldown,
 		AdminPath:             cfg.AdminPath,
+		DefaultBaseURL:        cfg.DefaultBaseURL,
 		Frontend:              cfg.Frontend,
 		Kuma:                  cfg.Kuma,
 		Groups:                cfg.Groups,
@@ -784,6 +797,7 @@ func adminSaveSettings(w http.ResponseWriter, r *http.Request) {
 		Interval              int            `json:"interval"`
 		ManualRefreshCooldown int            `json:"manualRefreshCooldown"`
 		AdminPath             string         `json:"adminPath"`
+		DefaultBaseURL        string         `json:"defaultBaseURL"`
 		Frontend              FrontendConfig `json:"frontend"`
 		Kuma                  KumaConfig     `json:"kuma"`
 	}
@@ -791,7 +805,7 @@ func adminSaveSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err := updateConfig(func(c *Config) error {
-		return applySettings(c, body.Port, body.Interval, body.ManualRefreshCooldown, body.AdminPath, body.Frontend, body.Kuma)
+		return applySettings(c, body.Port, body.Interval, body.ManualRefreshCooldown, body.AdminPath, body.DefaultBaseURL, body.Frontend, body.Kuma)
 	})
 	finishChange(w, err, false)
 }
@@ -974,7 +988,13 @@ func adminUpstreamModels(w http.ResponseWriter, r *http.Request) {
 		writeAdminJSON(w, 400, map[string]string{"error": "密钥不能为空"})
 		return
 	}
-	ids, err := listUpstreamModels(body.Provider, body.BaseURL, key)
+	baseURL := strings.TrimSpace(body.BaseURL)
+	if baseURL == "" {
+		mu.RLock()
+		baseURL = cfg.DefaultBaseURL
+		mu.RUnlock()
+	}
+	ids, err := listUpstreamModels(body.Provider, baseURL, key)
 	if err != nil {
 		writeAdminJSON(w, 400, map[string]string{"error": err.Error()})
 		return
@@ -1115,6 +1135,27 @@ func normalizeBaseURL(provider, raw string) (string, error) {
 	out := strings.TrimRight(u.String(), "/")
 	if len(out) > 500 {
 		return "", errors.New("地址过长")
+	}
+	return out, nil
+}
+
+func cleanDefaultBase(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		raw = "https://zzshu.cc"
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "https://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.User != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return "", errors.New("默认接口地址需是网址，例如 https://zzshu.cc")
+	}
+	u.RawQuery = ""
+	u.Fragment = ""
+	out := strings.TrimRight(u.String(), "/")
+	if len(out) > 500 {
+		return "", errors.New("默认接口地址过长")
 	}
 	return out, nil
 }

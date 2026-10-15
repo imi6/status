@@ -34,6 +34,7 @@ type Config struct {
 	ManualRefreshCooldown int            `json:"manualRefreshCooldown"` // 手动刷新全站冷却时间（秒），默认60
 	AdminPassword         string         `json:"adminPassword"`         // 管理后台密码，留空则关闭后台
 	AdminPath             string         `json:"adminPath"`             // 后台路径名，留空则不注册入口
+	DefaultBaseURL        string         `json:"defaultBaseURL"`        // 新建模型时使用的默认接口地址
 	Frontend              FrontendConfig `json:"frontend"`
 	Kuma                  KumaConfig     `json:"kuma"`
 	Groups                []Group        `json:"groups"`
@@ -169,6 +170,11 @@ func normalizeConfig(c *Config) {
 	}
 	if c.Frontend.Footer == "" {
 		c.Frontend.Footer = "Powered by go-status"
+	}
+	if strings.TrimSpace(c.DefaultBaseURL) == "" {
+		c.DefaultBaseURL = "https://zzshu.cc"
+	} else if cleaned, err := cleanDefaultBase(c.DefaultBaseURL); err == nil {
+		c.DefaultBaseURL = cleaned
 	}
 	if c.Groups == nil {
 		c.Groups = []Group{}
@@ -604,6 +610,89 @@ func getLastCheck(groupName, subName, modelID string) (bool, int, time.Time) {
 	return up == 1, lat, time.Unix(ts, 0)
 }
 
+// 最近一小时里只要有成功，偶发失败只算降级。连续失败满一小时才算异常。
+func classifyProbeStatus(groupName, subName, modelID string, now time.Time) (string, string) {
+	if db == nil {
+		return "unknown", "无采样"
+	}
+	cutoff := now.Add(-time.Hour).Unix()
+	rows, err := db.Query(
+		`SELECT up, checked_at FROM checks WHERE group_name = ? AND sub_name = ? AND model_id = ? AND checked_at >= ? ORDER BY checked_at`,
+		groupName, subName, modelID, cutoff,
+	)
+	if err != nil {
+		return "unknown", "无采样"
+	}
+	defer rows.Close()
+	var ups []bool
+	var times []int64
+	for rows.Next() {
+		var up int
+		var ts int64
+		if rows.Scan(&up, &ts) != nil {
+			continue
+		}
+		ups = append(ups, up == 1)
+		times = append(times, ts)
+	}
+	if len(ups) == 0 {
+		return "unknown", "无采样"
+	}
+	if ups[len(ups)-1] {
+		for _, up := range ups {
+			if !up {
+				return "degraded", "降级"
+			}
+		}
+		return "up", "正常"
+	}
+	streakStart := times[0]
+	allDown := true
+	for i := len(ups) - 1; i >= 0; i-- {
+		if ups[i] {
+			allDown = false
+			break
+		}
+		streakStart = times[i]
+	}
+	if allDown {
+		var prevUp int
+		var prevTs int64
+		err := db.QueryRow(
+			`SELECT up, checked_at FROM checks WHERE group_name = ? AND sub_name = ? AND model_id = ? AND checked_at < ? ORDER BY checked_at DESC LIMIT 1`,
+			groupName, subName, modelID, cutoff,
+		).Scan(&prevUp, &prevTs)
+		if err == nil && prevUp == 0 {
+			streakStart = prevTs
+		}
+	}
+	if now.Unix()-streakStart >= int64(time.Hour/time.Second) {
+		return "down", "异常"
+	}
+	return "degraded", "降级"
+}
+
+func overallFromRows(sections []Section) (string, string) {
+	anyDown, anyDegraded := false, false
+	for _, sec := range sections {
+		for _, r := range sec.Rows {
+			switch r.Status {
+			case "down":
+				anyDown = true
+			case "degraded":
+				anyDegraded = true
+			}
+		}
+	}
+	if anyDown {
+		return "down", "部分异常"
+	}
+	if anyDegraded {
+		return "degraded", "降级"
+	}
+	return "up", "运行正常"
+}
+
 func cleanupOld() {
 	cutoff := time.Now().Add(-84 * 24 * time.Hour).Unix()
 	db.Exec(`DELETE FROM checks WHERE checked_at < ?`, cutoff)
@@ -894,15 +983,11 @@ func providerFamily(p string) string {
 
 // updateRow 检测完一个模型后立即更新共享状态，前端轮询可见
 func updateRow(gName string, sg SubGroup, m Model, sections *[]Section, up bool, lat int) {
-	statusStr := "down"
-	label := "异常"
-	if up {
-		statusStr = "up"
-		label = "正常"
-	}
+	_ = up
 	hist := getHistory(gName, sg.Name, m.ID, 120)
 	score := calcHealthScore(gName, sg.Name, m.ID)
 	_, _, lastAt := getLastCheck(gName, sg.Name, m.ID)
+	statusStr, label := classifyProbeStatus(gName, sg.Name, m.ID, time.Now())
 
 	row := GroupResp{
 		Name:          m.ID,
@@ -920,25 +1005,7 @@ func updateRow(gName string, sg SubGroup, m Model, sections *[]Section, up bool,
 	mu.Lock()
 	*sections = upsertSectionRow(*sections, gName, row)
 
-	// 计算当前整体状态
-	allUp := true
-	for _, sec := range *sections {
-		for _, r := range sec.Rows {
-			if r.Status == "down" {
-				allUp = false
-				break
-			}
-		}
-		if !allUp {
-			break
-		}
-	}
-	overallStatus := "up"
-	overallLabel := "运行正常"
-	if !allUp {
-		overallStatus = "degraded"
-		overallLabel = "部分异常"
-	}
+	overallStatus, overallLabel := overallFromRows(*sections)
 
 	statusV2 = StatusRespV2{
 		Title:    cfg.Frontend.Title,
@@ -1066,27 +1133,8 @@ func refresh() {
 		}
 	}
 
-	// 计算整体状态
-	allUp := true
-	for _, sec := range sections {
-		for _, r := range sec.Rows {
-			if r.Status == "down" {
-				allUp = false
-				break
-			}
-		}
-		if !allUp {
-			break
-		}
-	}
-
 	// 全部检测完毕，标记 checking = false
-	overallStatus := "up"
-	overallLabel := "运行正常"
-	if !allUp {
-		overallStatus = "down"
-		overallLabel = "部分异常"
-	}
+	overallStatus, overallLabel := overallFromRows(sections)
 
 	mu.Lock()
 	statusV2 = StatusRespV2{
@@ -1106,25 +1154,38 @@ func refresh() {
 		if latCount > 0 {
 			avgPing = totalLat / latCount
 		}
-		pingKuma(cfg.Kuma.Slug, allUp, avgPing)
+		pingKuma(cfg.Kuma.Slug, overallStatus != "down", avgPing)
 	}
 	// 2. 推送每个子组的独立状态
 	if cfg.Kuma.BaseURL != "" {
 		for _, g := range cfg.Groups {
 			for _, sg := range g.SubGroups {
 				if sg.KumaSlug != "" {
-					var sgUpCount, sgTotal int
 					var sgLatSum, sgLatCount int
+					sgUp := len(sg.Models) > 0
 					for _, m := range sg.Models {
-						up, lat, _ := getLastCheck(g.Name, sg.Name, m.ID)
-						sgTotal++
-						if up {
-							sgUpCount++
+						found := false
+						for _, sec := range sections {
+							if sec.Name != g.Name {
+								continue
+							}
+							for _, r := range sec.Rows {
+								if r.SubName == sg.Name && r.Name == m.ID {
+									found = true
+									if r.Status == "down" {
+										sgUp = false
+									}
+								}
+							}
+						}
+						if !found {
+							sgUp = false
+						}
+						if _, lat, at := getLastCheck(g.Name, sg.Name, m.ID); !at.IsZero() {
 							sgLatSum += lat
 							sgLatCount++
 						}
 					}
-					sgUp := sgUpCount == sgTotal && sgTotal > 0
 					sgAvgPing := 0
 					if sgLatCount > 0 {
 						sgAvgPing = sgLatSum / sgLatCount

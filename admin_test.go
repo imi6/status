@@ -313,3 +313,17 @@ func TestAdminPathReplacesDefaultRoute(t *testing.T) {
 		t.Fatalf("custom api status %d body %s", session.Code, session.Body.String())
 	}
 }
+
+func TestEmptyModelBaseUsesDefault(t *testing.T) {
+	got, err := cleanDefaultBase("zzshu.cc")
+	if err != nil || got != "https://zzshu.cc" {
+		t.Fatalf("clean default %q %v", got, err)
+	}
+	c := Config{DefaultBaseURL: "https://zzshu.cc", Groups: []Group{{Name: "G", SubGroups: []SubGroup{{Name: "S"}}}}}
+	if err := addModel(&c, "G", "S", Model{ID: "gpt", Provider: "openai-compat", Key: "k", Timeout: 30}); err != nil {
+		t.Fatal(err)
+	}
+	if c.Groups[0].SubGroups[0].Models[0].BaseURL != "https://zzshu.cc/v1" {
+		t.Fatalf("base = %q", c.Groups[0].SubGroups[0].Models[0].BaseURL)
+	}
+}

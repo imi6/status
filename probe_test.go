@@ -1,10 +1,12 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -88,4 +90,62 @@ func TestCheckOpenAICompatRequiresModelText(t *testing.T) {
 	if up {
 		t.Fatal("HTTP 200 without model text should be down")
 	}
+}
+
+func TestClassifyProbeStatus(t *testing.T) {
+	old := db
+	opened, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "checks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db = opened
+	t.Cleanup(func() {
+		opened.Close()
+		db = old
+	})
+	if err := ensureSchema(); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	insert := func(model string, up int, ts time.Time) {
+		_, err := db.Exec(
+			`INSERT INTO checks (group_name, sub_name, model_id, up, latency, checked_at) VALUES (?,?,?,?,?,?)`,
+			"G", "S", model, up, 10, ts.Unix(),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	check := func(model, wantStatus, wantLabel string) {
+		t.Helper()
+		status, label := classifyProbeStatus("G", "S", model, now)
+		if status != wantStatus || label != wantLabel {
+			t.Fatalf("%s: got %s %s, want %s %s", model, status, label, wantStatus, wantLabel)
+		}
+	}
+
+	insert("ok", 1, now.Add(-40*time.Minute))
+	insert("ok", 1, now.Add(-time.Minute))
+	check("ok", "up", "正常")
+
+	insert("blip", 1, now.Add(-40*time.Minute))
+	insert("blip", 1, now.Add(-10*time.Minute))
+	insert("blip", 0, now.Add(-2*time.Minute))
+	insert("blip", 0, now)
+	check("blip", "degraded", "降级")
+
+	insert("wave", 1, now.Add(-40*time.Minute))
+	insert("wave", 0, now.Add(-20*time.Minute))
+	insert("wave", 1, now)
+	check("wave", "degraded", "降级")
+
+	insert("short", 1, now.Add(-50*time.Minute))
+	insert("short", 0, now.Add(-20*time.Minute))
+	insert("short", 0, now)
+	check("short", "degraded", "降级")
+
+	insert("out", 0, now.Add(-80*time.Minute))
+	insert("out", 0, now.Add(-40*time.Minute))
+	insert("out", 0, now)
+	check("out", "down", "异常")
 }
