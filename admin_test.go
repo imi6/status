@@ -384,17 +384,17 @@ func TestTelegramDigestAndSend(t *testing.T) {
 	markTelegramPushed(now)
 	held := []Section{{Name: "Claude", Rows: []GroupResp{{Name: "haiku", SubName: "Claude Max", Status: "down"}}}}
 	prevHeld := map[string]string{"Claude\x1fClaude Max\x1fhaiku": "up"}
-	if text := takeTelegram(prevHeld, "up", held, "down", "部分异常", 30*time.Minute, now.Add(10*time.Minute)); text != "" {
-		t.Fatalf("should wait for interval, got %q", text)
+	if text, reason := takeTelegram(prevHeld, "up", held, "down", "部分异常", 30*time.Minute, now.Add(10*time.Minute)); text != "" || !strings.Contains(reason, "未到推送间隔") {
+		t.Fatalf("should wait for interval, got %q %q", text, reason)
 	}
-	merged := takeTelegram(prevHeld, "down", held, "down", "部分异常", 30*time.Minute, now.Add(30*time.Minute))
+	merged, _ := takeTelegram(prevHeld, "down", held, "down", "部分异常", 30*time.Minute, now.Add(30*time.Minute))
 	if !strings.Contains(merged, "正常 → 异常") || !strings.Contains(merged, "整体：运行正常 → 部分异常") {
 		t.Fatalf("merged digest:\n%s", merged)
 	}
 	back := []Section{{Name: "Claude", Rows: []GroupResp{{Name: "haiku", SubName: "Claude Max", Status: "up"}}}}
 	takeTelegram(map[string]string{"Claude\x1fClaude Max\x1fhaiku": "down"}, "down", back, "up", "运行正常", 30*time.Minute, now.Add(31*time.Minute))
-	if text := takeTelegram(map[string]string{"Claude\x1fClaude Max\x1fhaiku": "up"}, "up", held, "down", "部分异常", 30*time.Minute, now.Add(40*time.Minute)); text != "" {
-		t.Fatalf("reverted change should stay quiet, got %q", text)
+	if text, reason := takeTelegram(map[string]string{"Claude\x1fClaude Max\x1fhaiku": "up"}, "up", held, "down", "部分异常", 30*time.Minute, now.Add(40*time.Minute)); text != "" || !strings.Contains(reason, "没有状态变化") {
+		t.Fatalf("reverted change should stay quiet, got %q %q", text, reason)
 	}
 
 	var gotChat, gotText string
@@ -420,6 +420,15 @@ func TestTelegramDigestAndSend(t *testing.T) {
 	}
 	if gotChat != "-1001" || gotText != "hi" {
 		t.Fatalf("sent %q %q", gotChat, gotText)
+	}
+}
+
+func TestTelegramLogNewestFirst(t *testing.T) {
+	noteTelegram("第一条")
+	noteTelegram("状态图已发到 1 个群")
+	logs := telegramLogs()
+	if len(logs) < 2 || logs[0].Text != "状态图已发到 1 个群" || logs[0].Time == "" {
+		t.Fatalf("%+v", logs)
 	}
 }
 

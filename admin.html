@@ -57,6 +57,11 @@ input,select,textarea{
 }
 input:focus,select:focus,textarea:focus{outline:2px solid rgba(28,36,48,.16);border-color:var(--accent)}
 textarea{min-height:72px;resize:vertical}
+.logbox{
+  margin-top:12px;max-height:280px;overflow:auto;white-space:pre-wrap;word-break:break-word;
+  background:var(--panel-2);border:1px solid var(--border-soft);border-radius:10px;
+  padding:12px;font:12.5px/1.6 ui-monospace,Consolas,monospace;color:var(--text);
+}
 .row-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;align-items:center}
 .hint{color:var(--faint);font-size:12px;margin-top:8px}
 .check{flex-direction:row;align-items:center;gap:8px;color:var(--text)}
@@ -183,6 +188,13 @@ button.drag:active{cursor:grabbing}
         <p class="hint">后台路径就是地址里的目录名，不要用 admin 这种常见词。修改路径或端口后需要重启进程。状态页不会显示这个入口。默认接口地址会填进新建模型，留空则使用 https://zzshu.cc。弹窗公告留空则状态页不显示。访客关掉后，同一条内容不会再弹；改内容后会再次弹出。把机器人拉进目标群后填写 Token。群组每行一个，同一条状态会发到全部群。推送状态变化时发送一张分组状态图：名称、倍率、状态、成功率和最近检测的颜色点。图片说明里只保留监控网址、官网和通知频道，留空则不显示。监控网址默认是 zzshu.si，按填写的原文发送，不会自动加 https://。间隔填 0 时，状态一变化就发。填 30 则最多每 30 分钟发一次，没有变化不发。实际发送不会快过检测间隔。</p>
         <div class="row-actions"><button type="submit">保存站点设置</button><button type="button" class="ghost" id="tgTest">发送测试</button></div>
       </form>
+    </section>
+
+    <section class="card">
+      <h2>推送日志</h2>
+      <p class="hint">每一轮检测都会记一条：没变化、还在等间隔、发送成功，或失败原因。这里只留最近 80 条，重启进程后会清空。容器日志里也能看到以 telegram: 开头的同样内容。</p>
+      <div class="row-actions"><button type="button" class="ghost" id="tgLogRefresh">刷新日志</button></div>
+      <pre id="tgLog" class="logbox">正在读取…</pre>
     </section>
 
     <section class="card">
@@ -388,7 +400,19 @@ async function reload(message){
   state = await api('/api/admin/config');
   fillSettings();
   render();
+  loadTgLog();
   if (message) showMsg(message, false);
+}
+async function loadTgLog(){
+  const el = $('tgLog');
+  if (!el) return;
+  try {
+    const data = await api('/api/admin/telegram-log');
+    const lines = data.logs || [];
+    el.textContent = lines.length ? lines.map(item => item.time + '  ' + item.text).join('\n') : '还没有推送记录。下一轮检测结束后会出现。';
+  } catch (err) {
+    el.textContent = err.message;
+  }
 }
 function findGroup(name){ return (state.groups || []).find(g => g.name === name); }
 function findSub(group, name){
@@ -441,10 +465,16 @@ $('settingsForm').addEventListener('submit', async (e) => {
 $('tgTest').addEventListener('click', async () => {
   const f = $('settingsForm');
   try {
-    await api('/api/admin/telegram-test', {method:'POST', body:{botToken:f.tgToken.value, chatIDs:f.tgChat.value.split(/\r?\n/).map(s => s.trim()).filter(Boolean)}});
-    showMsg('测试消息已发到填写的群。保存设置后，才会按推送间隔自动推送。', false);
+    const btn = $('tgTest');
+    btn.disabled = true;
+    try {
+      await api('/api/admin/telegram-test', {method:'POST', body:{botToken:f.tgToken.value, chatIDs:f.tgChat.value.split(/\r?\n/).map(s => s.trim()).filter(Boolean), statusURL:f.tgStatus.value, website:f.tgWebsite.value, channel:f.tgChannel.value}});
+    } finally { btn.disabled = false; }
+    showMsg('当前状态图已发到填写的群。保存设置后，才会按推送间隔自动推送。', false);
   } catch (err) { showMsg(err.message, true); }
+  loadTgLog();
 });
+$('tgLogRefresh').addEventListener('click', loadTgLog);
 $('clearHistory').addEventListener('click', async () => {
   if (!confirm('清空全部探测记录？状态页上的历史颜色和成功率会重新开始计算，不能恢复。')) return;
   const btn = $('clearHistory');

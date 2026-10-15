@@ -1566,22 +1566,37 @@ func refresh() {
 	// 启动后的第一轮，以及清空记录后的第一轮，只当基线，不推送。
 	nowPush := time.Now()
 	historyNow := atomic.LoadUint64(&historyEpoch)
-	if !telegramBaselined || historyNow != atomic.LoadUint64(&telegramSyncedEpoch) {
+	if tgToken == "" || len(tgChats) == 0 {
+		noteTelegram("未填写 Bot Token 或群组，不推送")
+	} else if !telegramBaselined || historyNow != atomic.LoadUint64(&telegramSyncedEpoch) {
 		telegramBaselined = true
 		atomic.StoreUint64(&telegramSyncedEpoch, historyNow)
 		resetTelegramQueue()
 		markTelegramPushed(nowPush)
-	} else if takeTelegram(prevRows, prevOverall, sections, overallStatus, overallLabel, tgEvery, nowPush) != "" {
+		noteTelegram("启动后或清空记录后的第一轮只记基线，不推送")
+	} else if text, reason := takeTelegram(prevRows, prevOverall, sections, overallStatus, overallLabel, tgEvery, nowPush); text == "" {
+		noteTelegram(reason)
+	} else {
 		caption := boardFooter(tgStatus, tgWebsite, tgChannel)
 		images, imgErr := renderStatusBoard(tgTitle, sections, nowPush)
 		if imgErr != nil {
-			log.Println("telegram image:", imgErr)
+			noteTelegram("状态图生成失败，改为文字：" + imgErr.Error())
 			texts := splitTelegram(formatStatusBoard(tgTitle, sections, nowPush, tgStatus, tgWebsite, tgChannel))
 			if err := sendTelegramAll(tgToken, tgChats, texts); err != nil {
-				log.Println("telegram:", err)
+				noteTelegram("文字发送失败：" + err.Error())
+			} else {
+				noteTelegram(fmt.Sprintf("文字已发到 %d 个群", len(tgChats)))
 			}
 		} else if err := sendTelegramPhotos(tgToken, tgChats, images, caption); err != nil {
-			log.Println("telegram:", err)
+			noteTelegram("图片发送失败：" + err.Error())
+			texts := splitTelegram(formatStatusBoard(tgTitle, sections, nowPush, tgStatus, tgWebsite, tgChannel))
+			if err := sendTelegramAll(tgToken, tgChats, texts); err != nil {
+				noteTelegram("文字发送失败：" + err.Error())
+			} else {
+				noteTelegram(fmt.Sprintf("已改用文字发到 %d 个群", len(tgChats)))
+			}
+		} else {
+			noteTelegram(fmt.Sprintf("状态图已发到 %d 个群", len(tgChats)))
 		}
 	}
 
@@ -1709,7 +1724,7 @@ func resetTelegramQueue() {
 }
 
 // takeTelegram 把本轮变化并进待发送队列。间隔为 0 时立刻返回消息；否则等到间隔结束再汇总。
-func takeTelegram(prev map[string]string, prevOverall string, sections []Section, overall, overallLabel string, every time.Duration, now time.Time) string {
+func takeTelegram(prev map[string]string, prevOverall string, sections []Section, overall, overallLabel string, every time.Duration, now time.Time) (string, string) {
 	items, of, ot, ol := collectTelegram(prev, prevOverall, sections, overall, overallLabel)
 	tgQueue.Lock()
 	defer tgQueue.Unlock()
@@ -1738,10 +1753,15 @@ func takeTelegram(prev map[string]string, prevOverall string, sections []Section
 		}
 	}
 	if len(tgQueue.items) == 0 && tgQueue.overallFrom == "" {
-		return ""
+		return "", "没有状态变化，不推送"
 	}
 	if every > 0 && !tgQueue.last.IsZero() && now.Sub(tgQueue.last) < every {
-		return ""
+		left := every - now.Sub(tgQueue.last)
+		mins := int((left + time.Minute - time.Nanosecond) / time.Minute)
+		if mins < 1 {
+			mins = 1
+		}
+		return "", fmt.Sprintf("有变化但未到推送间隔，约 %d 分钟后再发", mins)
 	}
 	pending := make([]tgItem, 0, len(tgQueue.items))
 	for _, it := range tgQueue.items {
@@ -1751,7 +1771,7 @@ func takeTelegram(prev map[string]string, prevOverall string, sections []Section
 	tgQueue.items = map[string]tgItem{}
 	tgQueue.overallFrom, tgQueue.overallTo, tgQueue.label = "", "", ""
 	tgQueue.last = now
-	return text
+	return text, ""
 }
 
 func formatStatusBoard(title string, sections []Section, now time.Time, statusURL, website, channel string) string {
@@ -1971,6 +1991,46 @@ var (
 	telegramAPI    = "https://api.telegram.org"
 	telegramClient = &http.Client{Timeout: 25 * time.Second}
 )
+
+type tgLogLine struct {
+	Time string `json:"time"`
+	Text string `json:"text"`
+}
+
+var tgLogs struct {
+	sync.Mutex
+	lines []tgLogLine
+}
+
+func noteTelegram(text string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	if len([]rune(text)) > 300 {
+		text = string([]rune(text)[:300])
+	}
+	log.Println("telegram:", text)
+	tgLogs.Lock()
+	tgLogs.lines = append(tgLogs.lines, tgLogLine{
+		Time: time.Now().Format("01-02 15:04:05"),
+		Text: text,
+	})
+	if len(tgLogs.lines) > 80 {
+		tgLogs.lines = tgLogs.lines[len(tgLogs.lines)-80:]
+	}
+	tgLogs.Unlock()
+}
+
+func telegramLogs() []tgLogLine {
+	tgLogs.Lock()
+	defer tgLogs.Unlock()
+	out := make([]tgLogLine, len(tgLogs.lines))
+	for i := range tgLogs.lines {
+		out[len(out)-1-i] = tgLogs.lines[i]
+	}
+	return out
+}
 
 func sendTelegramAll(token string, chats []string, texts []string) error {
 	var failed []string

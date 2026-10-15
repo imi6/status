@@ -60,6 +60,47 @@ func TestRenderStatusBoard(t *testing.T) {
 	}
 }
 
+func TestTelegramTestSendsCurrentBoard(t *testing.T) {
+	var paths []string
+	var caption string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if strings.HasSuffix(r.URL.Path, "/sendPhoto") {
+			_ = r.ParseMultipartForm(8 << 20)
+			caption = r.FormValue("caption")
+		}
+		w.Header().Set("content-type", "application/json")
+		io.WriteString(w, `{"ok":true}`)
+	}))
+	defer srv.Close()
+	old := telegramAPI
+	telegramAPI = srv.URL
+	t.Cleanup(func() { telegramAPI = old })
+	mu.Lock()
+	oldStatus, oldCfg := statusV2, cfg
+	statusV2 = StatusRespV2{Sections: []Section{{Name: "GPT", Rows: []GroupResp{{Name: "plus", SubName: "GPT Plus", Status: "up"}}}}}
+	cfg.Frontend.Title = "监控"
+	mu.Unlock()
+	t.Cleanup(func() {
+		mu.Lock()
+		statusV2, cfg = oldStatus, oldCfg
+		mu.Unlock()
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/telegram-test", strings.NewReader(`{"botToken":"123:abc","chatIDs":["-1001"],"statusURL":"zzshu.si","website":"zzshu.cc"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	adminTelegramTest(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code %d %s", rec.Code, rec.Body.String())
+	}
+	if len(paths) != 1 || !strings.HasSuffix(paths[0], "/sendPhoto") {
+		t.Fatalf("paths %v", paths)
+	}
+	if !strings.Contains(caption, "测试推送") || !strings.Contains(caption, "监控 zzshu.si") || !strings.Contains(caption, "官网 zzshu.cc") {
+		t.Fatalf("caption %q", caption)
+	}
+}
+
 func TestSendTelegramPhoto(t *testing.T) {
 	var gotChat, gotCaption, filename string
 	var gotPNG bool

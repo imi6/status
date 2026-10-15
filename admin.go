@@ -960,6 +960,15 @@ func apiAdmin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		adminTelegramTest(w, r)
+	case "telegram-log":
+		if !requireAdmin(w, r) {
+			return
+		}
+		if r.Method != http.MethodGet {
+			writeAdminJSON(w, 405, map[string]string{"error": "method not allowed"})
+			return
+		}
+		writeAdminJSON(w, 200, map[string]any{"logs": telegramLogs()})
 	case "clear-history":
 		if !requireAdmin(w, r) {
 			return
@@ -1109,10 +1118,27 @@ func adminTelegramTest(w http.ResponseWriter, r *http.Request) {
 		writeAdminJSON(w, 400, map[string]string{"error": "请先填写 Bot Token 和群组 ID"})
 		return
 	}
-	if err := sendTelegramAll(cleaned.BotToken, cleaned.ChatIDs, []string{"监控已连接到这个群。之后按设置的间隔，在分组状态变化时推送。"}); err != nil {
+	mu.RLock()
+	title := cfg.Frontend.Title
+	sections := make([]Section, len(statusV2.Sections))
+	for i, sec := range statusV2.Sections {
+		sections[i] = Section{Name: sec.Name, Rows: append([]GroupResp(nil), sec.Rows...)}
+	}
+	mu.RUnlock()
+	now := time.Now()
+	caption := "测试推送\n" + boardFooter(cleaned.StatusURL, cleaned.Website, cleaned.Channel)
+	images, err := renderStatusBoard(title, sections, now)
+	if err != nil {
+		noteTelegram("测试状态图生成失败：" + err.Error())
+		writeAdminJSON(w, 500, map[string]string{"error": "状态图生成失败：" + err.Error()})
+		return
+	}
+	if err := sendTelegramPhotos(cleaned.BotToken, cleaned.ChatIDs, images, caption); err != nil {
+		noteTelegram("测试状态图发送失败：" + err.Error())
 		writeAdminJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
+	noteTelegram(fmt.Sprintf("测试状态图已发到 %d 个群", len(cleaned.ChatIDs)))
 	writeAdminJSON(w, 200, map[string]bool{"ok": true})
 }
 
