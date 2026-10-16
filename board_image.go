@@ -26,6 +26,11 @@ type boardCard struct {
 	dots                      []int
 }
 
+type boardSection struct {
+	name  string
+	cards []boardCard
+}
+
 func renderStatusBoard(title string, sections []Section, now time.Time) ([][]byte, error) {
 	titleFace, nameFace, metaFace, err := boardFaces()
 	if err != nil {
@@ -39,8 +44,8 @@ func renderStatusBoard(title string, sections []Section, now time.Time) ([][]byt
 	if title == "" {
 		title = "分组状态"
 	}
-	cards := buildBoardCards(sections)
-	pngBytes, err := drawBoardPage(titleFace, nameFace, metaFace, title, cards, now, boardColumns(len(cards)))
+	groups := buildBoardSections(sections)
+	pngBytes, err := drawBoardPage(titleFace, nameFace, metaFace, title, groups, now, columnsFor(groups))
 	if err != nil {
 		return nil, err
 	}
@@ -49,14 +54,23 @@ func renderStatusBoard(title string, sections []Section, now time.Time) ([][]byt
 }
 
 func buildBoardCards(sections []Section) []boardCard {
+	var cards []boardCard
+	for _, group := range buildBoardSections(sections) {
+		cards = append(cards, group.cards...)
+	}
+	return cards
+}
+
+func buildBoardSections(sections []Section) []boardSection {
 	dup := map[string]int{}
 	for _, sec := range sections {
 		for _, row := range sec.Rows {
 			dup[sec.Name+"\x1f"+row.SubName]++
 		}
 	}
-	var cards []boardCard
+	var groups []boardSection
 	for _, sec := range sections {
+		var cards []boardCard
 		for _, row := range sec.Rows {
 			name := strings.TrimSpace(row.SubName)
 			if name == "" {
@@ -73,8 +87,12 @@ func buildBoardCards(sections []Section) []boardCard {
 				dots:   boardDotLevels(row),
 			})
 		}
+		if len(cards) == 0 {
+			continue
+		}
+		groups = append(groups, boardSection{name: strings.TrimSpace(sec.Name), cards: cards})
 	}
-	return cards
+	return groups
 }
 
 func ratioTag(v string) string {
@@ -142,24 +160,45 @@ const (
 	boardGap    = 16
 	boardCardW  = 524
 	boardCardH  = 148
-	boardHeadH  = 108
-	boardBottom = 28
+	boardHeadH    = 108
+	boardSectionH = 72
+	boardBottom   = 28
 )
 
 func boardSize(n, cols int) (int, int) {
-	rows := (n + cols - 1) / cols
-	if rows < 1 {
-		rows = 1
-	}
-	width := boardMargin*2 + cols*boardCardW + (cols-1)*boardGap
-	height := boardHeadH + rows*boardCardH + (rows-1)*boardGap + boardBottom
-	return width, height
+	return boardExtent([]boardSection{{cards: make([]boardCard, n)}}, cols)
 }
 
-// boardColumns 分组多时加列，让整张图不会太长，Telegram 压缩后仍能看清。
+func boardExtent(groups []boardSection, cols int) (int, int) {
+	if cols < 1 {
+		cols = 2
+	}
+	width := boardMargin*2 + cols*boardCardW + (cols-1)*boardGap
+	y := boardHeadH
+	any := false
+	for _, group := range groups {
+		if len(group.cards) == 0 {
+			continue
+		}
+		any = true
+		y += boardSectionH
+		rows := (len(group.cards) + cols - 1) / cols
+		y += rows*boardCardH + (rows-1)*boardGap + boardGap
+	}
+	if !any {
+		return width, boardHeadH + 80
+	}
+	return width, y - boardGap + boardBottom
+}
+
+// boardColumns 卡片多时加列，让整张图不会太长，Telegram 压缩后仍能看清。
 func boardColumns(n int) int {
+	return columnsFor([]boardSection{{cards: make([]boardCard, n)}})
+}
+
+func columnsFor(groups []boardSection) int {
 	for cols := 2; cols < 6; cols++ {
-		w, h := boardSize(n, cols)
+		w, h := boardExtent(groups, cols)
 		if float64(h) <= float64(w)*1.4 {
 			return cols
 		}
@@ -167,7 +206,7 @@ func boardColumns(n int) int {
 	return 6
 }
 
-func drawBoardPage(titleFace, nameFace, metaFace font.Face, title string, cards []boardCard, now time.Time, cols int) ([]byte, error) {
+func drawBoardPage(titleFace, nameFace, metaFace font.Face, title string, groups []boardSection, now time.Time, cols int) ([]byte, error) {
 	const (
 		margin = boardMargin
 		gap    = boardGap
@@ -178,7 +217,7 @@ func drawBoardPage(titleFace, nameFace, metaFace font.Face, title string, cards 
 	if cols < 1 {
 		cols = 2
 	}
-	width, height := boardSize(len(cards), cols)
+	width, height := boardExtent(groups, cols)
 	img := image.NewRGBA(image.Rect(0, 0, width, height))
 	bg := color.RGBA{243, 246, 251, 255}
 	draw.Draw(img, img.Bounds(), image.NewUniform(bg), image.Point{}, draw.Src)
@@ -189,18 +228,32 @@ func drawBoardPage(titleFace, nameFace, metaFace font.Face, title string, cards 
 	drawString(img, titleFace, margin, titleBaseline, fitText(titleFace, title, width-240), ink)
 	clock := now.Format("01/02 15:04")
 	drawString(img, metaFace, width-margin-textWidth(metaFace, clock), titleBaseline-4, clock, muted)
-	sub := strconv.Itoa(len(cards)) + " 个分组"
+	cardCount := 0
+	for _, group := range groups {
+		cardCount += len(group.cards)
+	}
+	sub := strconv.Itoa(len(groups)) + " 个分组 · " + strconv.Itoa(cardCount) + " 项"
 	drawString(img, metaFace, margin, titleBaseline+12+metaFace.Metrics().Ascent.Ceil(), sub, muted)
 
 	cardW := boardCardW
-	for i, card := range cards {
-		col := i % cols
-		row := i / cols
-		x := margin + col*(cardW+gap)
-		y := headH + row*(cardH+gap)
-		drawBoardCard(img, nameFace, metaFace, x, y, cardW, cardH, radius, card)
+	contentW := width - margin*2
+	y := headH
+	for _, group := range groups {
+		if len(group.cards) == 0 {
+			continue
+		}
+		drawSectionHead(img, titleFace, margin, y, contentW, group.name)
+		y += boardSectionH
+		for i, card := range group.cards {
+			col := i % cols
+			row := i / cols
+			x := margin + col*(cardW+gap)
+			drawBoardCard(img, nameFace, metaFace, x, y+row*(cardH+gap), cardW, cardH, radius, card)
+		}
+		rows := (len(group.cards) + cols - 1) / cols
+		y += rows*cardH + (rows-1)*gap + gap
 	}
-	if len(cards) == 0 {
+	if cardCount == 0 {
 		drawString(img, nameFace, margin, headH+36, "暂无分组", muted)
 	}
 
@@ -209,6 +262,22 @@ func drawBoardPage(titleFace, nameFace, metaFace font.Face, title string, cards 
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+func drawSectionHead(img *image.RGBA, titleFace font.Face, x, y, width int, name string) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "未命名分组"
+	}
+	ink := color.RGBA{28, 36, 48, 255}
+	barH := 36
+	barY := y + (boardSectionH-barH)/2
+	fillRoundRect(img, image.Rect(x, barY, x+8, barY+barH), 4, ink)
+	ascent := titleFace.Metrics().Ascent.Ceil()
+	textH := ascent + titleFace.Metrics().Descent.Ceil()
+	baseline := barY + (barH-textH)/2 + ascent
+	drawString(img, titleFace, x+22, baseline, fitText(titleFace, name, width-40), ink)
+	fillRoundRect(img, image.Rect(x, y+boardSectionH-8, x+width, y+boardSectionH-5), 1, color.RGBA{210, 218, 230, 255})
 }
 
 func drawBoardCard(img *image.RGBA, nameFace, metaFace font.Face, x, y, w, h, radius int, card boardCard) {

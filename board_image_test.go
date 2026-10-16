@@ -66,6 +66,19 @@ func TestRenderStatusBoard(t *testing.T) {
 	if cfg.Width != 1120 || cfg.Height < 200 {
 		t.Fatalf("size %dx%d", cfg.Width, cfg.Height)
 	}
+	grouped := []Section{
+		{Name: "GPT", Rows: []GroupResp{{Name: "plus", SubName: "GPT Plus", Status: "up"}}},
+		{Name: "Claude", Rows: []GroupResp{{Name: "max", SubName: "Claude Max", Status: "down"}}},
+	}
+	groups := buildBoardSections(grouped)
+	if len(groups) != 2 || groups[0].name != "GPT" || groups[1].name != "Claude" {
+		t.Fatalf("sections %+v", groups)
+	}
+	oneW, oneH := boardExtent(groups[:1], 2)
+	twoW, twoH := boardExtent(groups, 2)
+	if twoW != oneW || twoH <= oneH+boardSectionH/2 {
+		t.Fatalf("group heading size %dx%d vs %dx%d", twoW, twoH, oneW, oneH)
+	}
 	cards := buildBoardCards(sections)
 	if cards[0].ratio != "0.09x" || cards[0].rate != "50%" || cards[0].dots[10] != 2 || cards[0].dots[11] != 0 {
 		t.Fatalf("card %+v", cards[0])
