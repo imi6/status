@@ -64,6 +64,10 @@ textarea{min-height:72px;resize:vertical}
 }
 .row-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;align-items:center}
 .hint{color:var(--faint);font-size:12px;margin-top:8px}
+.field-label{display:block;font-size:12px;font-weight:650;color:var(--dim)}
+.wide{grid-column:1 / -1}
+.tg-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.4fr) auto;gap:8px;margin-top:8px}
+.tg-row button{align-self:stretch}
 .check{flex-direction:row;align-items:center;gap:8px;color:var(--text)}
 .check input{width:auto}
 .group{
@@ -121,6 +125,7 @@ button.drag:active{cursor:grabbing}
 @media(max-width:720px){
   .grid{grid-template-columns:1fr}
   .top,.group-head,.sub-head,.model{flex-direction:column}
+  .tg-row{grid-template-columns:1fr}
   .wrap{padding:18px 14px 36px}
 }
 </style>
@@ -180,12 +185,22 @@ button.drag:active{cursor:grabbing}
           <label class="wide">Telegram Bot Token<input name="tgToken" type="password" autocomplete="new-password" spellcheck="false" placeholder="123456:ABC..."></label>
           <label class="wide">Telegram 群组<textarea name="tgChat" spellcheck="false" placeholder="每行一个群组 ID"></textarea></label>
           <label>群推送间隔（分钟）<input name="tgInterval" type="number" min="0" max="10080" value="0"></label>
-          <label>监控网址<input name="tgStatus" spellcheck="false" placeholder="zzshu.si"></label>
-          <label>官网<input name="tgWebsite" spellcheck="false" placeholder="zzshu.cc"></label>
-          <label>通知频道<input name="tgChannel" spellcheck="false" placeholder="@channel"></label>
+          <label>每排按钮
+            <select name="tgPerRow">
+              <option value="1">1 个</option>
+              <option value="2">2 个</option>
+              <option value="3">3 个</option>
+              <option value="4">4 个</option>
+            </select>
+          </label>
+          <div class="wide" id="tgButtonEditor">
+            <span class="field-label">推送按钮</span>
+            <div id="tgButtons"></div>
+            <div class="row-actions"><button type="button" class="ghost" id="addTgButton">添加按钮</button></div>
+          </div>
           <label class="wide">页脚 HTML<textarea name="footer"></textarea></label>
         </div>
-        <p class="hint">后台路径就是地址里的目录名，不要用 admin 这种常见词。修改路径或端口后需要重启进程。状态页不会显示这个入口。默认接口地址会填进新建模型，留空则使用 https://zzshu.cc。弹窗公告留空则状态页不显示。访客关掉后，同一条内容不会再弹；改内容后会再次弹出。把机器人拉进目标群后填写 Token。群组每行一个，同一条状态会发到全部群。推送状态变化时发送一张分组状态图：名称、倍率、状态、成功率和最近检测的颜色点。图片说明里只保留监控网址、官网和通知频道，留空则不显示。监控网址默认是 zzshu.si，按填写的原文发送，不会自动加 https://。间隔填 0 时，状态一变化就发。填 30 则最多每 30 分钟发一次，没有变化不发。实际发送不会快过检测间隔。</p>
+        <p class="hint">后台路径就是地址里的目录名，不要用 admin 这种常见词。修改路径或端口后需要重启进程。状态页不会显示这个入口。默认接口地址会填进新建模型，留空则使用 https://zzshu.cc。弹窗公告留空则状态页不显示。访客关掉后，同一条内容不会再弹；改内容后会再次弹出。把机器人拉进目标群后填写 Token。群组每行一个，同一条状态会发到全部群。推送状态变化时发送一张分组状态图：名称、倍率、状态、成功率和最近检测的颜色点。图片下面是链接按钮，名称和链接都可以改，每排可以放 1 到 4 个。链接可写 https://zzshu.si、zzshu.si 或 @zhizhishuai。删光按钮后，图片下面不再放按钮。间隔填 0 时，状态一变化就发。填 30 则最多每 30 分钟发一次，没有变化不发。实际发送不会快过检测间隔。</p>
         <div class="row-actions"><button type="submit">保存站点设置</button><button type="button" class="ghost" id="tgTest">发送测试</button></div>
       </form>
     </section>
@@ -360,9 +375,29 @@ function fillSettings(){
   const chatIDs = Array.isArray(tg.chatIDs) && tg.chatIDs.length ? tg.chatIDs : (tg.chatID ? [tg.chatID] : []);
   f.tgChat.value = chatIDs.join('\n');
   f.tgInterval.value = tg.interval || 0;
-  f.tgStatus.value = tg.statusURL || 'zzshu.si';
-  f.tgWebsite.value = tg.website || '';
-  f.tgChannel.value = tg.channel || '';
+  f.tgPerRow.value = String(tg.buttonsPerRow || 1);
+  renderTgButtons(Array.isArray(tg.buttons) ? tg.buttons : []);
+}
+function renderTgButtons(buttons){
+  const root = $('tgButtons');
+  root.innerHTML = buttons.map(b => (
+    '<div class="tg-row"><input data-name placeholder="名称，例如 监控 zzshu.si" value="' + escapeHtml(b.name || '') + '"><input data-url spellcheck="false" placeholder="https://zzshu.si 或 @zhizhishuai" value="' + escapeHtml(b.url || '') + '"><button type="button" class="ghost" data-del-tg>删除</button></div>'
+  )).join('');
+}
+function readTgButtons(){
+  return [...document.querySelectorAll('#tgButtons .tg-row')].map(row => ({
+    name: row.querySelector('[data-name]').value,
+    url: row.querySelector('[data-url]').value
+  }));
+}
+function telegramBody(f){
+  return {
+    botToken: f.tgToken.value,
+    chatIDs: f.tgChat.value.split(/\r?\n/).map(s => s.trim()).filter(Boolean),
+    interval: Number(f.tgInterval.value || 0),
+    buttonsPerRow: Number(f.tgPerRow.value || 1),
+    buttons: readTgButtons()
+  };
 }
 let _modelGroup = '';
 function render(){
@@ -457,7 +492,7 @@ $('settingsForm').addEventListener('submit', async (e) => {
       frontend: {title:f.title.value, subtitle:f.subtitle.value, icon:f.icon.value, footer:f.footer.value, noticeTitle:f.noticeTitle.value, notice:f.notice.value},
       defaultBaseURL: f.defaultBaseURL.value,
       kuma: {baseURL:f.kumaBase.value, slug:f.kumaSlug.value},
-      telegram: {botToken:f.tgToken.value, chatIDs:f.tgChat.value.split(/\r?\n/).map(s => s.trim()).filter(Boolean), interval:Number(f.tgInterval.value || 0), statusURL:f.tgStatus.value, website:f.tgWebsite.value, channel:f.tgChannel.value}
+      telegram: telegramBody(f)
     }});
     await reload('站点设置已保存。');
   } catch (err) { showMsg(err.message, true); }
@@ -468,11 +503,21 @@ $('tgTest').addEventListener('click', async () => {
     const btn = $('tgTest');
     btn.disabled = true;
     try {
-      await api('/api/admin/telegram-test', {method:'POST', body:{botToken:f.tgToken.value, chatIDs:f.tgChat.value.split(/\r?\n/).map(s => s.trim()).filter(Boolean), statusURL:f.tgStatus.value, website:f.tgWebsite.value, channel:f.tgChannel.value}});
+      await api('/api/admin/telegram-test', {method:'POST', body:telegramBody(f)});
     } finally { btn.disabled = false; }
     showMsg('当前状态图已发到填写的群。保存设置后，才会按推送间隔自动推送。', false);
   } catch (err) { showMsg(err.message, true); }
   loadTgLog();
+});
+$('addTgButton').addEventListener('click', () => {
+  const current = readTgButtons();
+  current.push({name:'', url:''});
+  renderTgButtons(current);
+});
+$('tgButtons').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-del-tg]');
+  if (!btn) return;
+  btn.closest('.tg-row').remove();
 });
 $('tgLogRefresh').addEventListener('click', loadTgLog);
 $('clearHistory').addEventListener('click', async () => {

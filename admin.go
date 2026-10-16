@@ -561,6 +561,19 @@ func cleanTelegram(t TelegramConfig) (TelegramConfig, error) {
 	if err != nil {
 		return t, err
 	}
+	if t.ButtonsPerRow == 0 {
+		t.ButtonsPerRow = 1
+	}
+	if t.ButtonsPerRow < 1 || t.ButtonsPerRow > 4 {
+		return t, errors.New("每排按钮数需在 1 到 4")
+	}
+	if t.Buttons == nil {
+		t.Buttons = legacyTelegramButtons(t)
+	}
+	t.Buttons, err = cleanTelegramButtons(t.Buttons)
+	if err != nil {
+		return t, err
+	}
 	if t.Interval < 0 || t.Interval > 10080 {
 		return t, errors.New("推送间隔需在 0 到 10080 分钟")
 	}
@@ -582,6 +595,113 @@ func cleanTelegram(t TelegramConfig) (TelegramConfig, error) {
 		}
 	}
 	return t, nil
+}
+
+func legacyTelegramButtons(t TelegramConfig) []TelegramButton {
+	status, err := cleanStatusURL(t.StatusURL)
+	if err != nil || status == "" {
+		status = "zzshu.si"
+	}
+	out := []TelegramButton{{Name: "监控 " + status, URL: "https://" + status}}
+	website := strings.TrimSpace(t.Website)
+	if website != "" && !sameBoardLink(website, status) {
+		if link, err := cleanButtonURL(website); err == nil {
+			out = append(out, TelegramButton{Name: "官网 " + buttonHost(website), URL: link})
+		}
+	}
+	channel := strings.TrimSpace(t.Channel)
+	if channel != "" {
+		if link, err := cleanButtonURL(channel); err == nil {
+			out = append(out, TelegramButton{Name: "通知频道 " + buttonHost(channel), URL: link})
+		}
+	}
+	return out
+}
+
+func cleanTelegramButtons(buttons []TelegramButton) ([]TelegramButton, error) {
+	if len(buttons) > 12 {
+		return nil, errors.New("最多 12 个按钮")
+	}
+	out := make([]TelegramButton, 0, len(buttons))
+	for _, button := range buttons {
+		name := strings.TrimSpace(button.Name)
+		raw := strings.TrimSpace(button.URL)
+		if name == "" && raw == "" {
+			continue
+		}
+		if name == "" || raw == "" {
+			return nil, errors.New("按钮需要同时填写名称和链接")
+		}
+		if len([]rune(name)) > 64 || strings.ContainsAny(name, "\r\n") {
+			return nil, errors.New("按钮名称不能超过 64 个字，也不能换行")
+		}
+		link, err := cleanButtonURL(raw)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, TelegramButton{Name: name, URL: link})
+	}
+	return out, nil
+}
+
+func cleanButtonURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", errors.New("按钮链接不能为空")
+	}
+	if strings.ContainsAny(raw, " \r\n<>\"") {
+		return "", errors.New("按钮链接不能包含空格或换行")
+	}
+	if strings.HasPrefix(raw, "@") {
+		name := raw[1:]
+		if !validButtonChannel(name) {
+			return "", errors.New("频道名需以 @ 开头，后面是 5 到 32 位字母、数字或下划线")
+		}
+		return "https://t.me/" + name, nil
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "https://" + strings.TrimLeft(raw, "/")
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.User != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return "", errors.New("按钮链接需为网址，或 @频道名")
+	}
+	if len(u.String()) > 500 {
+		return "", errors.New("按钮链接过长")
+	}
+	return u.String(), nil
+}
+
+func buttonHost(v string) string {
+	v = strings.TrimSpace(v)
+	if strings.HasPrefix(v, "@") {
+		return v
+	}
+	lower := strings.ToLower(v)
+	for _, prefix := range []string{"https://", "http://"} {
+		if strings.HasPrefix(lower, prefix) {
+			v = v[len(prefix):]
+			break
+		}
+	}
+	v = strings.TrimRight(v, "/")
+	if i := strings.IndexAny(v, "/?#"); i >= 0 {
+		v = v[:i]
+	}
+	return v
+}
+
+func validButtonChannel(name string) bool {
+	if len(name) < 5 || len(name) > 32 {
+		return false
+	}
+	for i, r := range name {
+		ok := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_'
+		if !ok || (i == 0 && r >= '0' && r <= '9') {
+			return false
+		}
+	}
+	return true
 }
 
 func validTelegramChat(id string) bool {
@@ -1063,6 +1183,9 @@ func adminGetConfig(w http.ResponseWriter, r *http.Request) {
 	if view.Groups == nil {
 		view.Groups = []Group{}
 	}
+	buttons, perRow := telegramButtons(view.Telegram)
+	view.Telegram.Buttons = buttons
+	view.Telegram.ButtonsPerRow = perRow
 	writeAdminJSON(w, 200, view)
 }
 
@@ -1126,14 +1249,14 @@ func adminTelegramTest(w http.ResponseWriter, r *http.Request) {
 	}
 	mu.RUnlock()
 	now := time.Now()
-	caption := "测试推送\n" + boardFooter(cleaned.StatusURL, cleaned.Website, cleaned.Channel)
 	images, err := renderStatusBoard(title, sections, now)
 	if err != nil {
 		noteTelegram("测试状态图生成失败：" + err.Error())
 		writeAdminJSON(w, 500, map[string]string{"error": "状态图生成失败：" + err.Error()})
 		return
 	}
-	if err := sendTelegramPhotos(cleaned.BotToken, cleaned.ChatIDs, images, caption); err != nil {
+	markup := telegramKeyboard(cleaned.Buttons, cleaned.ButtonsPerRow)
+	if err := sendTelegramPhotos(cleaned.BotToken, cleaned.ChatIDs, images, "测试推送", markup); err != nil {
 		noteTelegram("测试状态图发送失败：" + err.Error())
 		writeAdminJSON(w, 400, map[string]string{"error": err.Error()})
 		return

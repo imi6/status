@@ -97,12 +97,13 @@ func TestParseUnalignedFont(t *testing.T) {
 
 func TestTelegramTestSendsCurrentBoard(t *testing.T) {
 	var paths []string
-	var caption string
+	var caption, markup string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		paths = append(paths, r.URL.Path)
 		if strings.HasSuffix(r.URL.Path, "/sendPhoto") {
 			_ = r.ParseMultipartForm(8 << 20)
 			caption = r.FormValue("caption")
+			markup = r.FormValue("reply_markup")
 		}
 		w.Header().Set("content-type", "application/json")
 		io.WriteString(w, `{"ok":true}`)
@@ -131,8 +132,8 @@ func TestTelegramTestSendsCurrentBoard(t *testing.T) {
 	if len(paths) != 1 || !strings.HasSuffix(paths[0], "/sendPhoto") {
 		t.Fatalf("paths %v", paths)
 	}
-	if !strings.Contains(caption, "测试推送") || !strings.Contains(caption, "监控 zzshu.si") || !strings.Contains(caption, "官网 zzshu.cc") {
-		t.Fatalf("caption %q", caption)
+	if caption != "测试推送" || !strings.Contains(markup, "监控 zzshu.si") || !strings.Contains(markup, "https://zzshu.si") || !strings.Contains(markup, "https://zzshu.cc") {
+		t.Fatalf("caption %q markup %q", caption, markup)
 	}
 }
 
@@ -175,7 +176,7 @@ func TestSendTelegramPhoto(t *testing.T) {
 	telegramAPI = srv.URL
 	t.Cleanup(func() { telegramAPI = old })
 	pngBytes := []byte("\x89PNG\r\n\x1a\nrest")
-	if err := sendTelegramPhoto("123:abc", "-1001", pngBytes, "监控 zzshu.si"); err != nil {
+	if err := sendTelegramPhoto("123:abc", "-1001", pngBytes, "监控 zzshu.si", nil); err != nil {
 		t.Fatal(err)
 	}
 	if gotChat != "-1001" || gotCaption != "监控 zzshu.si" || filename != "status.png" || !gotPNG {

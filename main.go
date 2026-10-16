@@ -53,9 +53,16 @@ type TelegramConfig struct {
 	ChatID    string   `json:"chatID"`
 	ChatIDs   []string `json:"chatIDs,omitempty"`
 	Interval  int      `json:"interval"`  // 群推送间隔（分钟）。0 表示状态一变化就推送
-	StatusURL string   `json:"statusURL"` // 推送消息底部的监控页地址，留空则使用 zzshu.si，不补协议
-	Website   string   `json:"website"`   // 推送消息底部的官网，留空不显示
-	Channel   string   `json:"channel"`   // 推送消息底部的通知频道，留空不显示
+	StatusURL     string           `json:"statusURL"` // 旧版底部监控地址；未配置按钮时仍用来生成默认按钮
+	Website       string           `json:"website"`   // 旧版底部官网
+	Channel       string           `json:"channel"`   // 旧版底部通知频道
+	Buttons       []TelegramButton `json:"buttons"`
+	ButtonsPerRow int              `json:"buttonsPerRow,omitempty"` // 每排按钮数，1 到 4
+}
+
+type TelegramButton struct {
+	Name string `json:"name"`
+	URL  string `json:"url"`
 }
 
 type KumaConfig struct {
@@ -1557,12 +1564,14 @@ func refresh() {
 	}
 
 	mu.RLock()
-	tgToken := cfg.Telegram.BotToken
-	tgChats := append([]string(nil), cfg.Telegram.ChatIDs...)
-	tgEvery := time.Duration(cfg.Telegram.Interval) * time.Minute
+	tg := cfg.Telegram
+	tgToken := tg.BotToken
+	tgChats := append([]string(nil), tg.ChatIDs...)
+	tgEvery := time.Duration(tg.Interval) * time.Minute
 	tgTitle := cfg.Frontend.Title
-	tgStatus, tgWebsite, tgChannel := cfg.Telegram.StatusURL, cfg.Telegram.Website, cfg.Telegram.Channel
 	mu.RUnlock()
+	tgButtons, tgPerRow := telegramButtons(tg)
+	tgMarkup := telegramKeyboard(tgButtons, tgPerRow)
 	// 启动后的第一轮，以及清空记录后的第一轮，只当基线，不推送。
 	nowPush := time.Now()
 	historyNow := atomic.LoadUint64(&historyEpoch)
@@ -1577,20 +1586,19 @@ func refresh() {
 	} else if text, reason := takeTelegram(prevRows, prevOverall, sections, overallStatus, overallLabel, tgEvery, nowPush); text == "" {
 		noteTelegram(reason)
 	} else {
-		caption := boardFooter(tgStatus, tgWebsite, tgChannel)
 		images, imgErr := renderStatusBoard(tgTitle, sections, nowPush)
 		if imgErr != nil {
 			noteTelegram("状态图生成失败，改为文字：" + imgErr.Error())
-			texts := splitTelegram(formatStatusBoard(tgTitle, sections, nowPush, tgStatus, tgWebsite, tgChannel))
-			if err := sendTelegramAll(tgToken, tgChats, texts); err != nil {
+			texts := splitTelegram(formatStatusBoard(tgTitle, sections, nowPush))
+			if err := sendTelegramAll(tgToken, tgChats, texts, tgMarkup); err != nil {
 				noteTelegram("文字发送失败：" + err.Error())
 			} else {
 				noteTelegram(fmt.Sprintf("文字已发到 %d 个群", len(tgChats)))
 			}
-		} else if err := sendTelegramPhotos(tgToken, tgChats, images, caption); err != nil {
+		} else if err := sendTelegramPhotos(tgToken, tgChats, images, "", tgMarkup); err != nil {
 			noteTelegram("图片发送失败：" + err.Error())
-			texts := splitTelegram(formatStatusBoard(tgTitle, sections, nowPush, tgStatus, tgWebsite, tgChannel))
-			if err := sendTelegramAll(tgToken, tgChats, texts); err != nil {
+			texts := splitTelegram(formatStatusBoard(tgTitle, sections, nowPush))
+			if err := sendTelegramAll(tgToken, tgChats, texts, tgMarkup); err != nil {
 				noteTelegram("文字发送失败：" + err.Error())
 			} else {
 				noteTelegram(fmt.Sprintf("已改用文字发到 %d 个群", len(tgChats)))
@@ -1774,7 +1782,7 @@ func takeTelegram(prev map[string]string, prevOverall string, sections []Section
 	return text, ""
 }
 
-func formatStatusBoard(title string, sections []Section, now time.Time, statusURL, website, channel string) string {
+func formatStatusBoard(title string, sections []Section, now time.Time) string {
 	title = strings.TrimSpace(title)
 	if title == "" {
 		title = "分组状态监控"
@@ -1796,10 +1804,6 @@ func formatStatusBoard(title string, sections []Section, now time.Time, statusUR
 			b.WriteByte('\n')
 			b.WriteString(boardLine(sec.Name, row, dup))
 		}
-	}
-	if footer := boardFooter(statusURL, website, channel); footer != "" {
-		b.WriteString("\n\n")
-		b.WriteString(footer)
 	}
 	return b.String()
 }
@@ -1879,22 +1883,46 @@ func isBoardSep(r rune) bool {
 	}
 }
 
-func boardFooter(statusURL, website, channel string) string {
-	cleaned, err := cleanStatusURL(statusURL)
-	if err != nil || cleaned == "" {
-		cleaned = "zzshu.si"
+func telegramButtons(t TelegramConfig) ([]TelegramButton, int) {
+	per := t.ButtonsPerRow
+	if per < 1 || per > 4 {
+		per = 1
 	}
-	statusURL = cleaned
-	website = strings.TrimSpace(website)
-	channel = strings.TrimSpace(channel)
-	parts := []string{"监控 " + statusURL}
-	if website != "" && !sameBoardLink(website, statusURL) {
-		parts = append(parts, "官网 "+website)
+	if t.Buttons != nil {
+		return t.Buttons, per
 	}
-	if channel != "" {
-		parts = append(parts, "通知频道 "+channel)
+	return legacyTelegramButtons(t), per
+}
+
+func telegramKeyboard(buttons []TelegramButton, perRow int) json.RawMessage {
+	if perRow < 1 || perRow > 4 {
+		perRow = 1
 	}
-	return strings.Join(parts, "\n")
+	var rows [][]map[string]string
+	var row []map[string]string
+	for _, button := range buttons {
+		name := strings.TrimSpace(button.Name)
+		link := strings.TrimSpace(button.URL)
+		if name == "" || link == "" {
+			continue
+		}
+		row = append(row, map[string]string{"text": name, "url": link})
+		if len(row) == perRow {
+			rows = append(rows, row)
+			row = nil
+		}
+	}
+	if len(row) > 0 {
+		rows = append(rows, row)
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	raw, err := json.Marshal(map[string]any{"inline_keyboard": rows})
+	if err != nil {
+		return nil
+	}
+	return raw
 }
 
 func sameBoardLink(a, b string) bool {
@@ -2032,11 +2060,15 @@ func telegramLogs() []tgLogLine {
 	return out
 }
 
-func sendTelegramAll(token string, chats []string, texts []string) error {
+func sendTelegramAll(token string, chats []string, texts []string, markup json.RawMessage) error {
 	var failed []string
 	for _, chat := range chats {
-		for _, text := range texts {
-			if err := sendTelegram(token, chat, text); err != nil {
+		for i, text := range texts {
+			var mark json.RawMessage
+			if i == len(texts)-1 {
+				mark = markup
+			}
+			if err := sendTelegram(token, chat, text, mark); err != nil {
 				failed = append(failed, chat+"："+err.Error())
 				break
 			}
@@ -2052,18 +2084,22 @@ func sendTelegramAll(token string, chats []string, texts []string) error {
 	return errors.New(msg)
 }
 
-func sendTelegram(token, chatID, text string) error {
+func sendTelegram(token, chatID, text string, markup json.RawMessage) error {
 	token = strings.TrimSpace(token)
 	chatID = strings.TrimSpace(chatID)
 	text = strings.TrimSpace(text)
 	if token == "" || chatID == "" || text == "" {
 		return nil
 	}
-	payload, err := json.Marshal(map[string]any{
+	payloadMap := map[string]any{
 		"chat_id":                  chatID,
 		"text":                     text,
 		"disable_web_page_preview": true,
-	})
+	}
+	if len(markup) > 0 {
+		payloadMap["reply_markup"] = markup
+	}
+	payload, err := json.Marshal(payloadMap)
 	if err != nil {
 		return errors.New("无法编码 Telegram 消息")
 	}
@@ -2096,15 +2132,17 @@ func sendTelegram(token, chatID, text string) error {
 	return errors.New(msg)
 }
 
-func sendTelegramPhotos(token string, chats []string, images [][]byte, caption string) error {
+func sendTelegramPhotos(token string, chats []string, images [][]byte, caption string, markup json.RawMessage) error {
 	var failed []string
 	for _, chat := range chats {
 		for i, img := range images {
 			text := ""
+			var mark json.RawMessage
 			if i == 0 {
 				text = caption
+				mark = markup
 			}
-			if err := sendTelegramPhoto(token, chat, img, text); err != nil {
+			if err := sendTelegramPhoto(token, chat, img, text, mark); err != nil {
 				failed = append(failed, chat+"："+err.Error())
 				break
 			}
@@ -2120,7 +2158,7 @@ func sendTelegramPhotos(token string, chats []string, images [][]byte, caption s
 	return errors.New(msg)
 }
 
-func sendTelegramPhoto(token, chatID string, png []byte, caption string) error {
+func sendTelegramPhoto(token, chatID string, png []byte, caption string, markup json.RawMessage) error {
 	token = strings.TrimSpace(token)
 	chatID = strings.TrimSpace(chatID)
 	caption = strings.TrimSpace(caption)
@@ -2132,6 +2170,9 @@ func sendTelegramPhoto(token, chatID string, png []byte, caption string) error {
 	_ = w.WriteField("chat_id", chatID)
 	if caption != "" {
 		_ = w.WriteField("caption", caption)
+	}
+	if len(markup) > 0 {
+		_ = w.WriteField("reply_markup", string(markup))
 	}
 	part, err := w.CreateFormFile("photo", "status.png")
 	if err != nil {

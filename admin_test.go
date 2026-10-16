@@ -323,7 +323,7 @@ func TestStatusBoardMessage(t *testing.T) {
 		{Name: "plus", SubName: "GPT Plus", Status: "up", Ratio: "0.09", Timelines: map[string][]TimelineBucket{"hour": hour}},
 		{Name: "pro", SubName: "GPT Pro", Status: "degraded", Timelines: map[string][]TimelineBucket{"hour": {{Samples: 5, Up: 2, Rate: 40}}}},
 	}}}
-	text := formatStatusBoard("吱吱鼠AI监控", sections, now, "", "zzshu.cc", "@zzshu")
+	text := formatStatusBoard("吱吱鼠AI监控", sections, now)
 	if !strings.Contains(text, "吱吱鼠AI监控\n10/15 14:40") {
 		t.Fatalf("header:\n%s", text)
 	}
@@ -333,16 +333,60 @@ func TestStatusBoardMessage(t *testing.T) {
 	if !strings.Contains(text, "🟡 40%  Pro") || strings.Contains(text, "Pro ×") || strings.Contains(text, "⬜") || strings.Contains(text, "🟥") {
 		t.Fatalf("pro:\n%s", text)
 	}
-	if !strings.HasSuffix(text, "监控 zzshu.si\n官网 zzshu.cc\n通知频道 @zzshu") || strings.Contains(text, "https://") {
-		t.Fatalf("footer:\n%s", text)
+	if strings.Contains(text, "监控 ") || strings.Contains(text, "官网") || strings.Contains(text, "通知频道") {
+		t.Fatalf("board text should leave links to buttons:\n%s", text)
 	}
-	plain := formatStatusBoard("吱吱鼠AI监控", sections, now, "", "", "")
-	if strings.Contains(plain, "官网") || strings.Contains(plain, "通知频道") || !strings.HasSuffix(plain, "监控 zzshu.si") || strings.Contains(plain, "https://") {
-		t.Fatalf("empty footer:\n%s", plain)
+}
+
+func TestTelegramButtons(t *testing.T) {
+	legacy, err := cleanTelegram(TelegramConfig{StatusURL: "zzshu.si", Website: "zzshu.cc", Channel: "@zhizhishuai"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	same := formatStatusBoard("吱吱鼠AI监控", sections, now, "https://zzshu.si", "https://zzshu.si", "")
-	if strings.Contains(same, "官网") || strings.Contains(same, "https://") || !strings.HasSuffix(same, "监控 zzshu.si") {
-		t.Fatalf("duplicate site:\n%s", same)
+	if len(legacy.Buttons) != 3 || legacy.ButtonsPerRow != 1 {
+		t.Fatalf("%+v", legacy.Buttons)
+	}
+	if legacy.Buttons[0].Name != "监控 zzshu.si" || legacy.Buttons[0].URL != "https://zzshu.si" {
+		t.Fatalf("status %+v", legacy.Buttons[0])
+	}
+	if legacy.Buttons[1].Name != "官网 zzshu.cc" || legacy.Buttons[1].URL != "https://zzshu.cc" {
+		t.Fatalf("site %+v", legacy.Buttons[1])
+	}
+	if legacy.Buttons[2].Name != "通知频道 @zhizhishuai" || legacy.Buttons[2].URL != "https://t.me/zhizhishuai" {
+		t.Fatalf("channel %+v", legacy.Buttons[2])
+	}
+	custom, err := cleanTelegram(TelegramConfig{
+		ButtonsPerRow: 2,
+		Buttons: []TelegramButton{
+			{Name: "监控", URL: "zzshu.si"},
+			{Name: "官网", URL: "https://zzshu.cc"},
+			{Name: "通知", URL: "@zhizhishuai"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := telegramKeyboard(custom.Buttons, custom.ButtonsPerRow)
+	var markup struct {
+		InlineKeyboard [][]struct {
+			Text string `json:"text"`
+			URL  string `json:"url"`
+		} `json:"inline_keyboard"`
+	}
+	if err := json.Unmarshal(raw, &markup); err != nil {
+		t.Fatal(err)
+	}
+	if len(markup.InlineKeyboard) != 2 || len(markup.InlineKeyboard[0]) != 2 || len(markup.InlineKeyboard[1]) != 1 {
+		t.Fatalf("rows %+v", markup.InlineKeyboard)
+	}
+	if markup.InlineKeyboard[0][0].URL != "https://zzshu.si" || markup.InlineKeyboard[1][0].URL != "https://t.me/zhizhishuai" {
+		t.Fatalf("urls %+v", markup.InlineKeyboard)
+	}
+	if _, err := cleanTelegram(TelegramConfig{Buttons: []TelegramButton{{Name: "只有名称"}}}); err == nil {
+		t.Fatal("expected missing url")
+	}
+	if _, err := cleanTelegram(TelegramConfig{ButtonsPerRow: 5}); err == nil {
+		t.Fatal("expected row error")
 	}
 }
 
@@ -415,7 +459,7 @@ func TestTelegramDigestAndSend(t *testing.T) {
 	old := telegramAPI
 	telegramAPI = srv.URL
 	t.Cleanup(func() { telegramAPI = old })
-	if err := sendTelegram("123:abc", "-1001", "hi"); err != nil {
+	if err := sendTelegram("123:abc", "-1001", "hi", nil); err != nil {
 		t.Fatal(err)
 	}
 	if gotChat != "-1001" || gotText != "hi" {
