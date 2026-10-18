@@ -72,11 +72,10 @@ body{min-height:100vh;background:var(--bg)}
 .metric .value{font-size:24px;font-weight:680;margin-top:6px;font-variant-numeric:tabular-nums}
 
 .site-switch{
-  margin-top:16px;display:flex;align-items:center;gap:12px;
+  margin-top:16px;
 }
 .site-switch[hidden]{display:none}
-.switch-label{flex:none;font-size:13px;font-weight:680;color:var(--dim);letter-spacing:.4px}
-.site-switch .group-switch{flex:1;margin-top:0}
+.site-switch .group-switch{margin-top:0}
 .group-switch{
   margin-top:16px;padding:8px;border:1px solid var(--border);border-radius:var(--radius);
   background:var(--panel);box-shadow:var(--shadow);
@@ -217,7 +216,6 @@ body{min-height:100vh;background:var(--bg)}
   </section>
 
   <section class="site-switch" id="siteSwitch" hidden>
-    <span class="switch-label">站点</span>
     <div class="group-switch" id="siteSwitchRow"></div>
   </section>
   <section class="group-switch" id="groupSwitch" hidden></section>

@@ -16,7 +16,11 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
 
 FROM alpine:3.22
 
+ENV TZ=Asia/Shanghai
+
 RUN apk add --no-cache ca-certificates tzdata font-wqy-zenhei \
+    && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
+    && echo "$TZ" > /etc/timezone \
     && mkdir -p /data /opt/status
 
 COPY --from=build /out/status /usr/local/bin/status

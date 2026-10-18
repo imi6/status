@@ -732,6 +732,7 @@ $('modelForm').provider.addEventListener('change', () => {
   const f = $('modelForm');
   if ((f.provider.value === 'openai-image' || f.provider.value === 'google-image') && Number(f.timeout.value) === 30) f.timeout.value = 120;
 });
+$('toggleKey').addEventListener('click', () => {
   const input = $('modelForm').key;
   const show = input.type === 'password';
   input.type = show ? 'text' : 'password';
