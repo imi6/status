@@ -1441,8 +1441,39 @@ func geminiInlineImage(mime, data string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(mime)), "image/") && strings.TrimSpace(data) != ""
 }
 
-func checkOne(m Model) (bool, int) {
+func isOpenAIFamilyImageModel(id string) bool {
+	id = strings.ToLower(strings.TrimSpace(id))
+	return strings.HasPrefix(id, "gpt-image-") ||
+		strings.HasPrefix(id, "dall-e") ||
+		id == "grok-imagine" ||
+		id == "grok-imagine-edit" ||
+		strings.HasPrefix(id, "grok-imagine-image")
+}
+
+func isGeminiImageModel(id string) bool {
+	id = strings.ToLower(strings.TrimSpace(id))
+	return strings.HasPrefix(id, "gemini-") && (strings.HasSuffix(id, "-image") || strings.Contains(id, "-image-"))
+}
+
+func probeProvider(m Model) string {
 	switch m.Provider {
+	case "openai-image", "google-image":
+		return m.Provider
+	}
+	if isGeminiImageModel(m.ID) && (m.Provider == "" || m.Provider == "google" || m.Provider == "openai-compat") {
+		return "google-image"
+	}
+	if isOpenAIFamilyImageModel(m.ID) && (m.Provider == "" || m.Provider == "openai-compat" || m.Provider == "openai-response") {
+		return "openai-image"
+	}
+	if m.Provider == "" {
+		return "openai-compat"
+	}
+	return m.Provider
+}
+
+func checkOne(m Model) (bool, int) {
+	switch probeProvider(m) {
 	case "openai-compat":
 		return checkOpenAICompat(m)
 	case "openai-image":

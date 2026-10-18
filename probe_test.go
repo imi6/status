@@ -179,6 +179,10 @@ func TestCheckOpenAIImageRequiresImage(t *testing.T) {
 	if !up || gotPath != "/v1/images/generations" || gotModel != "flux" || gotPrompt != "red square" || gotN != 1 || gotSize != "1024x1024" {
 		t.Fatalf("up %v path %s model %s prompt %s n %d size %s", up, gotPath, gotModel, gotPrompt, gotN, gotSize)
 	}
+	up, _ = checkOne(Model{ID: "gpt-image-2", BaseURL: srv.URL, Key: "sk", Timeout: 5, Provider: "openai-compat"})
+	if !up || gotModel != "gpt-image-2" || gotPath != "/v1/images/generations" {
+		t.Fatalf("compat image model up %v path %s model %s", up, gotPath, gotModel)
+	}
 	up, _ = checkOne(Model{ID: "flux", BaseURL: srv.URL + "/empty", Key: "sk", Timeout: 5, Provider: "openai-image"})
 	if up {
 		t.Fatal("HTTP 200 without image should be down")

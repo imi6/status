@@ -322,7 +322,7 @@ button.drag:active{cursor:grabbing}
         </span>
       </label>
     </div>
-    <p class="hint">地址留空时使用站点设置里的默认接口地址。网站根地址和带 /v1 的地址都可以，NewAPI、OpenAI 兼容会自动补上 /v1。对话协议每次发送 hi，读到文字才算可用。OpenAI 生图走 /images/generations，Grok 生图也用这个协议。Gemini 生图走 /v1beta 的 generateContent，要求返回图片。生图超时建议设为 120 秒。</p>
+    <p class="hint">地址留空时使用站点设置里的默认接口地址。网站根地址和带 /v1 的地址都可以，NewAPI、OpenAI 兼容会自动补上 /v1。对话协议每次发送 hi，读到文字才算可用。模型名是 gpt-image、dall-e、grok-imagine 时，即使协议仍是 OpenAI 兼容，也会改走 /images/generations，一次生成 1 张，尺寸 1024x1024。Gemini 生图走 /v1beta 的 generateContent，要求返回图片。生图超时建议设为 120 秒。</p>
     <p class="hint" id="keyHint" hidden>编辑时密钥留空会继续用原来的密钥获取模型。</p>
     <div class="row-actions">
       <button type="submit">保存</button>
