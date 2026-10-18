@@ -70,11 +70,15 @@ func updateConfig(mut func(*Config) error) error {
 		return err
 	}
 	normalizeConfig(&next)
-	if err := saveMonitorGroups(next.Groups); err != nil {
+	if len(next.Sites) == 0 {
+		next.Sites = configSites(next)
+	}
+	if err := saveMonitorSites(next.Sites); err != nil {
 		return err
 	}
 	stored := next
 	stored.Groups = []Group{}
+	stored.Sites = nil
 	if err := writeConfigFile(stored); err != nil {
 		return err
 	}
@@ -110,13 +114,127 @@ func cleanRatio(v string) (string, error) {
 	return v, nil
 }
 
-func findGroup(c *Config, name string) int {
-	for i := range c.Groups {
-		if c.Groups[i].Name == name {
+func groupsAt(c *Config, site string) (*[]Group, error) {
+	site = strings.TrimSpace(site)
+	if len(c.Sites) == 0 {
+		if c.Groups == nil {
+			c.Groups = []Group{}
+		}
+		return &c.Groups, nil
+	}
+	if site == "" {
+		if len(c.Sites) == 1 {
+			if c.Sites[0].Groups == nil {
+				c.Sites[0].Groups = []Group{}
+			}
+			return &c.Sites[0].Groups, nil
+		}
+		return nil, errors.New("请选择站点")
+	}
+	for i := range c.Sites {
+		if c.Sites[i].Name == site {
+			if c.Sites[i].Groups == nil {
+				c.Sites[i].Groups = []Group{}
+			}
+			return &c.Sites[i].Groups, nil
+		}
+	}
+	return nil, errors.New("站点不存在")
+}
+
+func findGroup(groups []Group, name string) int {
+	for i := range groups {
+		if groups[i].Name == name {
 			return i
 		}
 	}
 	return -1
+}
+
+func addSite(c *Config, name string) error {
+	name, err := cleanName(name, "站点名称")
+	if err != nil {
+		return err
+	}
+	for _, site := range c.Sites {
+		if site.Name == name {
+			return errors.New("站点已存在")
+		}
+	}
+	if c.Sites == nil {
+		c.Sites = []Site{}
+	}
+	c.Sites = append(c.Sites, Site{Name: name, Groups: []Group{}})
+	return nil
+}
+
+func updateSite(c *Config, name, newName string) error {
+	name = strings.TrimSpace(name)
+	idx := -1
+	for i := range c.Sites {
+		if c.Sites[i].Name == name {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return errors.New("站点不存在")
+	}
+	newName, err := cleanName(newName, "站点名称")
+	if err != nil {
+		return err
+	}
+	if newName != name {
+		for _, site := range c.Sites {
+			if site.Name == newName {
+				return errors.New("站点已存在")
+			}
+		}
+	}
+	c.Sites[idx].Name = newName
+	return nil
+}
+
+func deleteSite(c *Config, name string) error {
+	name = strings.TrimSpace(name)
+	idx := -1
+	for i := range c.Sites {
+		if c.Sites[i].Name == name {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return errors.New("站点不存在")
+	}
+	if len(c.Sites) == 1 {
+		return errors.New("至少保留一个站点")
+	}
+	c.Sites = append(c.Sites[:idx], c.Sites[idx+1:]...)
+	return nil
+}
+
+func reorderSites(c *Config, names []string) error {
+	if len(names) != len(c.Sites) {
+		return errors.New("排序不完整")
+	}
+	byName := make(map[string]Site, len(c.Sites))
+	for _, site := range c.Sites {
+		byName[site.Name] = site
+	}
+	next := make([]Site, 0, len(names))
+	seen := map[string]bool{}
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		site, ok := byName[name]
+		if !ok || seen[name] {
+			return errors.New("排序包含未知站点")
+		}
+		seen[name] = true
+		next = append(next, site)
+	}
+	c.Sites = next
+	return nil
 }
 
 func findSub(g *Group, name string) int {
@@ -128,42 +246,54 @@ func findSub(g *Group, name string) int {
 	return -1
 }
 
-func addGroup(c *Config, name string, manual bool) error {
-	name, err := cleanName(name, "分组名称")
+func addGroup(c *Config, site, name string, manual bool) error {
+	groups, err := groupsAt(c, site)
 	if err != nil {
 		return err
 	}
-	if findGroup(c, name) >= 0 {
+	name, err = cleanName(name, "分组名称")
+	if err != nil {
+		return err
+	}
+	if findGroup(*groups, name) >= 0 {
 		return errors.New("分组已存在")
 	}
-	c.Groups = append(c.Groups, Group{Name: name, ManualRefresh: manual, SubGroups: []SubGroup{}})
+	*groups = append(*groups, Group{Name: name, ManualRefresh: manual, SubGroups: []SubGroup{}})
 	return nil
 }
 
-func updateGroup(c *Config, name, newName string, manual bool) error {
+func updateGroup(c *Config, site, name, newName string, manual bool) error {
+	groups, err := groupsAt(c, site)
+	if err != nil {
+		return err
+	}
 	name = strings.TrimSpace(name)
-	idx := findGroup(c, name)
+	idx := findGroup(*groups, name)
 	if idx < 0 {
 		return errors.New("分组不存在")
 	}
-	newName, err := cleanName(newName, "分组名称")
+	newName, err = cleanName(newName, "分组名称")
 	if err != nil {
 		return err
 	}
-	if newName != name && findGroup(c, newName) >= 0 {
+	if newName != name && findGroup(*groups, newName) >= 0 {
 		return errors.New("分组已存在")
 	}
-	c.Groups[idx].Name = newName
-	c.Groups[idx].ManualRefresh = manual
+	(*groups)[idx].Name = newName
+	(*groups)[idx].ManualRefresh = manual
 	return nil
 }
 
-func reorderGroups(c *Config, names []string) error {
-	if len(names) != len(c.Groups) {
+func reorderGroups(c *Config, site string, names []string) error {
+	groups, err := groupsAt(c, site)
+	if err != nil {
+		return err
+	}
+	if len(names) != len(*groups) {
 		return errors.New("排序不完整")
 	}
-	byName := make(map[string]Group, len(c.Groups))
-	for _, g := range c.Groups {
+	byName := make(map[string]Group, len(*groups))
+	for _, g := range *groups {
 		byName[g.Name] = g
 	}
 	next := make([]Group, 0, len(names))
@@ -177,29 +307,37 @@ func reorderGroups(c *Config, names []string) error {
 		seen[name] = true
 		next = append(next, g)
 	}
-	c.Groups = next
+	*groups = next
 	return nil
 }
 
-func deleteGroup(c *Config, name string) error {
-	idx := findGroup(c, strings.TrimSpace(name))
+func deleteGroup(c *Config, site, name string) error {
+	groups, err := groupsAt(c, site)
+	if err != nil {
+		return err
+	}
+	idx := findGroup(*groups, strings.TrimSpace(name))
 	if idx < 0 {
 		return errors.New("分组不存在")
 	}
-	c.Groups = append(c.Groups[:idx], c.Groups[idx+1:]...)
+	*groups = append((*groups)[:idx], (*groups)[idx+1:]...)
 	return nil
 }
 
-func addSubGroup(c *Config, group, name, slug, ratio string) error {
-	gi := findGroup(c, strings.TrimSpace(group))
-	if gi < 0 {
-		return errors.New("分组不存在")
-	}
-	name, err := cleanName(name, "子组名称")
+func addSubGroup(c *Config, site, group, name, slug, ratio string) error {
+	groups, err := groupsAt(c, site)
 	if err != nil {
 		return err
 	}
-	if findSub(&c.Groups[gi], name) >= 0 {
+	gi := findGroup(*groups, strings.TrimSpace(group))
+	if gi < 0 {
+		return errors.New("分组不存在")
+	}
+	name, err = cleanName(name, "子组名称")
+	if err != nil {
+		return err
+	}
+	if findSub(&(*groups)[gi], name) >= 0 {
 		return errors.New("子组已存在")
 	}
 	slug = strings.TrimSpace(slug)
@@ -210,24 +348,28 @@ func addSubGroup(c *Config, group, name, slug, ratio string) error {
 	if err != nil {
 		return err
 	}
-	c.Groups[gi].SubGroups = append(c.Groups[gi].SubGroups, SubGroup{Name: name, KumaSlug: slug, Ratio: ratio, Models: []Model{}})
+	(*groups)[gi].SubGroups = append((*groups)[gi].SubGroups, SubGroup{Name: name, KumaSlug: slug, Ratio: ratio, Models: []Model{}})
 	return nil
 }
 
-func updateSubGroup(c *Config, group, name, newName, slug, ratio string) error {
-	gi := findGroup(c, strings.TrimSpace(group))
+func updateSubGroup(c *Config, site, group, name, newName, slug, ratio string) error {
+	groups, err := groupsAt(c, site)
+	if err != nil {
+		return err
+	}
+	gi := findGroup(*groups, strings.TrimSpace(group))
 	if gi < 0 {
 		return errors.New("分组不存在")
 	}
-	si := findSub(&c.Groups[gi], strings.TrimSpace(name))
+	si := findSub(&(*groups)[gi], strings.TrimSpace(name))
 	if si < 0 {
 		return errors.New("子组不存在")
 	}
-	newName, err := cleanName(newName, "子组名称")
+	newName, err = cleanName(newName, "子组名称")
 	if err != nil {
 		return err
 	}
-	if newName != strings.TrimSpace(name) && findSub(&c.Groups[gi], newName) >= 0 {
+	if newName != strings.TrimSpace(name) && findSub(&(*groups)[gi], newName) >= 0 {
 		return errors.New("子组已存在")
 	}
 	slug = strings.TrimSpace(slug)
@@ -238,26 +380,30 @@ func updateSubGroup(c *Config, group, name, newName, slug, ratio string) error {
 	if err != nil {
 		return err
 	}
-	c.Groups[gi].SubGroups[si].Name = newName
-	c.Groups[gi].SubGroups[si].KumaSlug = slug
-	c.Groups[gi].SubGroups[si].Ratio = ratio
+	(*groups)[gi].SubGroups[si].Name = newName
+	(*groups)[gi].SubGroups[si].KumaSlug = slug
+	(*groups)[gi].SubGroups[si].Ratio = ratio
 	return nil
 }
 
-func copySubGroup(c *Config, group, name, newName, slug, ratio string) error {
-	gi := findGroup(c, strings.TrimSpace(group))
-	if gi < 0 {
-		return errors.New("分组不存在")
-	}
-	si := findSub(&c.Groups[gi], strings.TrimSpace(name))
-	if si < 0 {
-		return errors.New("子组不存在")
-	}
-	newName, err := cleanName(newName, "子组名称")
+func copySubGroup(c *Config, site, group, name, newName, slug, ratio string) error {
+	groups, err := groupsAt(c, site)
 	if err != nil {
 		return err
 	}
-	if findSub(&c.Groups[gi], newName) >= 0 {
+	gi := findGroup(*groups, strings.TrimSpace(group))
+	if gi < 0 {
+		return errors.New("分组不存在")
+	}
+	si := findSub(&(*groups)[gi], strings.TrimSpace(name))
+	if si < 0 {
+		return errors.New("子组不存在")
+	}
+	newName, err = cleanName(newName, "子组名称")
+	if err != nil {
+		return err
+	}
+	if findSub(&(*groups)[gi], newName) >= 0 {
 		return errors.New("子组已存在")
 	}
 	slug = strings.TrimSpace(slug)
@@ -268,34 +414,42 @@ func copySubGroup(c *Config, group, name, newName, slug, ratio string) error {
 	if err != nil {
 		return err
 	}
-	src := c.Groups[gi].SubGroups[si]
+	src := (*groups)[gi].SubGroups[si]
 	models := make([]Model, len(src.Models))
 	copy(models, src.Models)
-	c.Groups[gi].SubGroups = append(c.Groups[gi].SubGroups, SubGroup{Name: newName, KumaSlug: slug, Ratio: ratio, Models: models})
+	(*groups)[gi].SubGroups = append((*groups)[gi].SubGroups, SubGroup{Name: newName, KumaSlug: slug, Ratio: ratio, Models: models})
 	return nil
 }
 
-func deleteSubGroup(c *Config, group, name string) error {
-	gi := findGroup(c, strings.TrimSpace(group))
+func deleteSubGroup(c *Config, site, group, name string) error {
+	groups, err := groupsAt(c, site)
+	if err != nil {
+		return err
+	}
+	gi := findGroup(*groups, strings.TrimSpace(group))
 	if gi < 0 {
 		return errors.New("分组不存在")
 	}
-	si := findSub(&c.Groups[gi], strings.TrimSpace(name))
+	si := findSub(&(*groups)[gi], strings.TrimSpace(name))
 	if si < 0 {
 		return errors.New("子组不存在")
 	}
-	g := &c.Groups[gi]
+	g := &(*groups)[gi]
 	g.SubGroups = append(g.SubGroups[:si], g.SubGroups[si+1:]...)
 	return nil
 }
 
-func reorderSubGroups(c *Config, group string, names []string) error {
+func reorderSubGroups(c *Config, site, group string, names []string) error {
+	groups, err := groupsAt(c, site)
+	if err != nil {
+		return err
+	}
 	group = strings.TrimSpace(group)
-	gi := findGroup(c, group)
+	gi := findGroup(*groups, group)
 	if gi < 0 {
 		return errors.New("分组不存在")
 	}
-	subs := c.Groups[gi].SubGroups
+	subs := (*groups)[gi].SubGroups
 	if len(names) != len(subs) {
 		return errors.New("排序不完整")
 	}
@@ -314,7 +468,7 @@ func reorderSubGroups(c *Config, group string, names []string) error {
 		seen[name] = true
 		next = append(next, sg)
 	}
-	c.Groups[gi].SubGroups = next
+	(*groups)[gi].SubGroups = next
 	return nil
 }
 
@@ -381,43 +535,51 @@ func hasModelID(sg SubGroup, id string, skip int) bool {
 	return false
 }
 
-func modelAt(c *Config, group, sub string, index int) (*Model, error) {
-	gi := findGroup(c, strings.TrimSpace(group))
+func modelAt(c *Config, site, group, sub string, index int) (*Model, error) {
+	groups, err := groupsAt(c, site)
+	if err != nil {
+		return nil, err
+	}
+	gi := findGroup(*groups, strings.TrimSpace(group))
 	if gi < 0 {
 		return nil, errors.New("分组不存在")
 	}
-	si := findSub(&c.Groups[gi], strings.TrimSpace(sub))
+	si := findSub(&(*groups)[gi], strings.TrimSpace(sub))
 	if si < 0 {
 		return nil, errors.New("子组不存在")
 	}
-	models := c.Groups[gi].SubGroups[si].Models
+	models := (*groups)[gi].SubGroups[si].Models
 	if index < 0 || index >= len(models) {
 		return nil, errors.New("模型不存在")
 	}
-	return &c.Groups[gi].SubGroups[si].Models[index], nil
+	return &(*groups)[gi].SubGroups[si].Models[index], nil
 }
 
-func addModel(c *Config, group, sub string, m Model) error {
-	gi := findGroup(c, strings.TrimSpace(group))
+func addModel(c *Config, site, group, sub string, m Model) error {
+	groups, err := groupsAt(c, site)
+	if err != nil {
+		return err
+	}
+	gi := findGroup(*groups, strings.TrimSpace(group))
 	if gi < 0 {
 		return errors.New("分组不存在")
 	}
-	si := findSub(&c.Groups[gi], strings.TrimSpace(sub))
+	si := findSub(&(*groups)[gi], strings.TrimSpace(sub))
 	if si < 0 {
 		return errors.New("子组不存在")
 	}
 	if err := cleanModel(&m, "", true, c.DefaultBaseURL); err != nil {
 		return err
 	}
-	if hasModelID(c.Groups[gi].SubGroups[si], m.ID, -1) {
+	if hasModelID((*groups)[gi].SubGroups[si], m.ID, -1) {
 		return errors.New("该子组已有相同模型 ID")
 	}
-	c.Groups[gi].SubGroups[si].Models = append(c.Groups[gi].SubGroups[si].Models, m)
+	(*groups)[gi].SubGroups[si].Models = append((*groups)[gi].SubGroups[si].Models, m)
 	return nil
 }
 
-func updateModel(c *Config, group, sub string, index int, m Model) error {
-	cur, err := modelAt(c, group, sub, index)
+func updateModel(c *Config, site, group, sub string, index int, m Model) error {
+	cur, err := modelAt(c, site, group, sub, index)
 	if err != nil {
 		return err
 	}
@@ -425,29 +587,37 @@ func updateModel(c *Config, group, sub string, index int, m Model) error {
 	if err := cleanModel(&m, prev, false, c.DefaultBaseURL); err != nil {
 		return err
 	}
-	gi := findGroup(c, strings.TrimSpace(group))
-	si := findSub(&c.Groups[gi], strings.TrimSpace(sub))
-	if hasModelID(c.Groups[gi].SubGroups[si], m.ID, index) {
+	groups, err := groupsAt(c, site)
+	if err != nil {
+		return err
+	}
+	gi := findGroup(*groups, strings.TrimSpace(group))
+	si := findSub(&(*groups)[gi], strings.TrimSpace(sub))
+	if hasModelID((*groups)[gi].SubGroups[si], m.ID, index) {
 		return errors.New("该子组已有相同模型 ID")
 	}
 	*cur = m
 	return nil
 }
 
-func deleteModel(c *Config, group, sub string, index int) error {
-	gi := findGroup(c, strings.TrimSpace(group))
+func deleteModel(c *Config, site, group, sub string, index int) error {
+	groups, err := groupsAt(c, site)
+	if err != nil {
+		return err
+	}
+	gi := findGroup(*groups, strings.TrimSpace(group))
 	if gi < 0 {
 		return errors.New("分组不存在")
 	}
-	si := findSub(&c.Groups[gi], strings.TrimSpace(sub))
+	si := findSub(&(*groups)[gi], strings.TrimSpace(sub))
 	if si < 0 {
 		return errors.New("子组不存在")
 	}
-	models := c.Groups[gi].SubGroups[si].Models
+	models := (*groups)[gi].SubGroups[si].Models
 	if index < 0 || index >= len(models) {
 		return errors.New("模型不存在")
 	}
-	c.Groups[gi].SubGroups[si].Models = append(models[:index], models[index+1:]...)
+	(*groups)[gi].SubGroups[si].Models = append(models[:index], models[index+1:]...)
 	return nil
 }
 
@@ -966,29 +1136,38 @@ func finishChange(w http.ResponseWriter, err error, probe bool) {
 	writeAdminJSON(w, 200, map[string]bool{"ok": true})
 }
 
-func renameGroupHistory(oldName, newName string) {
+func renameSiteHistory(oldName, newName string) {
 	if db == nil || oldName == "" || oldName == newName {
 		return
 	}
-	if _, err := db.Exec(`UPDATE checks SET group_name = ? WHERE group_name = ?`, newName, oldName); err != nil {
+	if _, err := db.Exec(`UPDATE checks SET site_name = ? WHERE site_name = ?`, newName, oldName); err != nil {
+		log.Println("rename site history:", err)
+	}
+}
+
+func renameGroupHistory(site, oldName, newName string) {
+	if db == nil || oldName == "" || oldName == newName {
+		return
+	}
+	if _, err := db.Exec(`UPDATE checks SET group_name = ? WHERE site_name = ? AND group_name = ?`, newName, site, oldName); err != nil {
 		log.Println("rename group history:", err)
 	}
 }
 
-func renameSubHistory(group, oldName, newName string) {
+func renameSubHistory(site, group, oldName, newName string) {
 	if db == nil || oldName == newName {
 		return
 	}
-	if _, err := db.Exec(`UPDATE checks SET sub_name = ? WHERE group_name = ? AND sub_name = ?`, newName, group, oldName); err != nil {
+	if _, err := db.Exec(`UPDATE checks SET sub_name = ? WHERE site_name = ? AND group_name = ? AND sub_name = ?`, newName, site, group, oldName); err != nil {
 		log.Println("rename subgroup history:", err)
 	}
 }
 
-func renameModelHistory(group, sub, oldID, newID string) {
+func renameModelHistory(site, group, sub, oldID, newID string) {
 	if db == nil || oldID == newID {
 		return
 	}
-	if _, err := db.Exec(`UPDATE checks SET model_id = ? WHERE group_name = ? AND sub_name = ? AND model_id = ?`, newID, group, sub, oldID); err != nil {
+	if _, err := db.Exec(`UPDATE checks SET model_id = ? WHERE site_name = ? AND group_name = ? AND sub_name = ? AND model_id = ?`, newID, site, group, sub, oldID); err != nil {
 		log.Println("rename model history:", err)
 	}
 }
@@ -1055,6 +1234,11 @@ func apiAdmin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		adminChangePassword(w, r)
+	case "sites":
+		if !requireAdmin(w, r) {
+			return
+		}
+		adminSites(w, r)
 	case "groups":
 		if !requireAdmin(w, r) {
 			return
@@ -1163,7 +1347,8 @@ type adminConfigView struct {
 	Frontend              FrontendConfig `json:"frontend"`
 	Kuma                  KumaConfig     `json:"kuma"`
 	Telegram              TelegramConfig `json:"telegram"`
-	Groups                []Group        `json:"groups"`
+	Sites                 []Site         `json:"sites"`
+	Groups                []Group        `json:"groups,omitempty"`
 }
 
 func adminGetConfig(w http.ResponseWriter, r *http.Request) {
@@ -1177,11 +1362,12 @@ func adminGetConfig(w http.ResponseWriter, r *http.Request) {
 		Frontend:              cfg.Frontend,
 		Kuma:                  cfg.Kuma,
 		Telegram:              cfg.Telegram,
-		Groups:                cfg.Groups,
+		Sites:                 configSites(cfg),
+		Groups:                nil,
 	}
 	mu.RUnlock()
-	if view.Groups == nil {
-		view.Groups = []Group{}
+	if view.Sites == nil {
+		view.Sites = []Site{}
 	}
 	buttons, perRow := telegramButtons(view.Telegram)
 	view.Telegram.Buttons = buttons
@@ -1299,7 +1485,50 @@ func adminChangePassword(w http.ResponseWriter, r *http.Request) {
 	finishChange(w, err, false)
 }
 
+type siteBody struct {
+	Name    string   `json:"name"`
+	NewName string   `json:"newName"`
+	Order   []string `json:"order"`
+}
+
+func adminSites(w http.ResponseWriter, r *http.Request) {
+	var body siteBody
+	if !decodeBody(w, r, &body) {
+		return
+	}
+	switch r.Method {
+	case http.MethodPost:
+		finishChange(w, updateConfig(func(c *Config) error {
+			return addSite(c, body.Name)
+		}), false)
+	case http.MethodPut:
+		newName := body.NewName
+		if strings.TrimSpace(newName) == "" {
+			newName = body.Name
+		}
+		err := updateConfig(func(c *Config) error {
+			return updateSite(c, body.Name, newName)
+		})
+		if err == nil {
+			renameSiteHistory(strings.TrimSpace(body.Name), strings.TrimSpace(newName))
+			renameLiveSite(strings.TrimSpace(body.Name), strings.TrimSpace(newName))
+		}
+		finishChange(w, err, false)
+	case http.MethodPatch:
+		finishChange(w, updateConfig(func(c *Config) error {
+			return reorderSites(c, body.Order)
+		}), false)
+	case http.MethodDelete:
+		finishChange(w, updateConfig(func(c *Config) error {
+			return deleteSite(c, body.Name)
+		}), true)
+	default:
+		writeAdminJSON(w, 405, map[string]string{"error": "method not allowed"})
+	}
+}
+
 type groupBody struct {
+	Site          string   `json:"site"`
 	Name          string   `json:"name"`
 	NewName       string   `json:"newName"`
 	ManualRefresh bool     `json:"manualRefresh"`
@@ -1314,7 +1543,7 @@ func adminGroups(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPost:
 		finishChange(w, updateConfig(func(c *Config) error {
-			return addGroup(c, body.Name, body.ManualRefresh)
+			return addGroup(c, body.Site, body.Name, body.ManualRefresh)
 		}), true)
 	case http.MethodPut:
 		newName := body.NewName
@@ -1322,23 +1551,23 @@ func adminGroups(w http.ResponseWriter, r *http.Request) {
 			newName = body.Name
 		}
 		err := updateConfig(func(c *Config) error {
-			return updateGroup(c, body.Name, newName, body.ManualRefresh)
+			return updateGroup(c, body.Site, body.Name, newName, body.ManualRefresh)
 		})
 		if err == nil {
-			renameGroupHistory(strings.TrimSpace(body.Name), strings.TrimSpace(newName))
+			renameGroupHistory(strings.TrimSpace(body.Site), strings.TrimSpace(body.Name), strings.TrimSpace(newName))
 		}
 		finishChange(w, err, true)
 	case http.MethodPatch:
 		err := updateConfig(func(c *Config) error {
-			return reorderGroups(c, body.Order)
+			return reorderGroups(c, body.Site, body.Order)
 		})
 		if err == nil {
-			reorderSections(body.Order)
+			reorderSections(strings.TrimSpace(body.Site), body.Order)
 		}
 		finishChange(w, err, false)
 	case http.MethodDelete:
 		finishChange(w, updateConfig(func(c *Config) error {
-			return deleteGroup(c, body.Name)
+			return deleteGroup(c, body.Site, body.Name)
 		}), true)
 	default:
 		writeAdminJSON(w, 405, map[string]string{"error": "method not allowed"})
@@ -1346,6 +1575,7 @@ func adminGroups(w http.ResponseWriter, r *http.Request) {
 }
 
 type subBody struct {
+	Site     string   `json:"site"`
 	Group    string   `json:"group"`
 	Name     string   `json:"name"`
 	NewName  string   `json:"newName"`
@@ -1364,9 +1594,9 @@ func adminSubGroups(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		err := updateConfig(func(c *Config) error {
 			if body.Copy {
-				return copySubGroup(c, body.Group, body.Name, body.NewName, body.KumaSlug, body.Ratio)
+				return copySubGroup(c, body.Site, body.Group, body.Name, body.NewName, body.KumaSlug, body.Ratio)
 			}
-			return addSubGroup(c, body.Group, body.Name, body.KumaSlug, body.Ratio)
+			return addSubGroup(c, body.Site, body.Group, body.Name, body.KumaSlug, body.Ratio)
 		})
 		if err == nil {
 			syncLiveRatios()
@@ -1378,25 +1608,25 @@ func adminSubGroups(w http.ResponseWriter, r *http.Request) {
 			newName = body.Name
 		}
 		err := updateConfig(func(c *Config) error {
-			return updateSubGroup(c, body.Group, body.Name, newName, body.KumaSlug, body.Ratio)
+			return updateSubGroup(c, body.Site, body.Group, body.Name, newName, body.KumaSlug, body.Ratio)
 		})
 		if err == nil {
-			renameSubHistory(strings.TrimSpace(body.Group), strings.TrimSpace(body.Name), strings.TrimSpace(newName))
-			renameLiveSubgroup(strings.TrimSpace(body.Group), strings.TrimSpace(body.Name), strings.TrimSpace(newName))
+			renameSubHistory(strings.TrimSpace(body.Site), strings.TrimSpace(body.Group), strings.TrimSpace(body.Name), strings.TrimSpace(newName))
+			renameLiveSubgroup(strings.TrimSpace(body.Site), strings.TrimSpace(body.Group), strings.TrimSpace(body.Name), strings.TrimSpace(newName))
 			syncLiveRatios()
 		}
 		finishChange(w, err, true)
 	case http.MethodPatch:
 		err := updateConfig(func(c *Config) error {
-			return reorderSubGroups(c, body.Group, body.Order)
+			return reorderSubGroups(c, body.Site, body.Group, body.Order)
 		})
 		if err == nil {
-			reorderSectionRows(strings.TrimSpace(body.Group), body.Order)
+			reorderSectionRows(strings.TrimSpace(body.Site), strings.TrimSpace(body.Group), body.Order)
 		}
 		finishChange(w, err, false)
 	case http.MethodDelete:
 		finishChange(w, updateConfig(func(c *Config) error {
-			return deleteSubGroup(c, body.Group, body.Name)
+			return deleteSubGroup(c, body.Site, body.Group, body.Name)
 		}), true)
 	default:
 		writeAdminJSON(w, 405, map[string]string{"error": "method not allowed"})
@@ -1404,6 +1634,7 @@ func adminSubGroups(w http.ResponseWriter, r *http.Request) {
 }
 
 type modelBody struct {
+	Site     string `json:"site"`
 	Group    string `json:"group"`
 	Subgroup string `json:"subgroup"`
 	Index    int    `json:"index"`
@@ -1418,25 +1649,25 @@ func adminModels(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPost:
 		finishChange(w, updateConfig(func(c *Config) error {
-			return addModel(c, body.Group, body.Subgroup, body.Model)
+			return addModel(c, body.Site, body.Group, body.Subgroup, body.Model)
 		}), true)
 	case http.MethodPut:
 		var oldID string
 		err := updateConfig(func(c *Config) error {
-			cur, err := modelAt(c, body.Group, body.Subgroup, body.Index)
+			cur, err := modelAt(c, body.Site, body.Group, body.Subgroup, body.Index)
 			if err != nil {
 				return err
 			}
 			oldID = cur.ID
-			return updateModel(c, body.Group, body.Subgroup, body.Index, body.Model)
+			return updateModel(c, body.Site, body.Group, body.Subgroup, body.Index, body.Model)
 		})
 		if err == nil {
-			renameModelHistory(strings.TrimSpace(body.Group), strings.TrimSpace(body.Subgroup), oldID, strings.TrimSpace(body.Model.ID))
+			renameModelHistory(strings.TrimSpace(body.Site), strings.TrimSpace(body.Group), strings.TrimSpace(body.Subgroup), oldID, strings.TrimSpace(body.Model.ID))
 		}
 		finishChange(w, err, true)
 	case http.MethodDelete:
 		finishChange(w, updateConfig(func(c *Config) error {
-			return deleteModel(c, body.Group, body.Subgroup, body.Index)
+			return deleteModel(c, body.Site, body.Group, body.Subgroup, body.Index)
 		}), true)
 	default:
 		writeAdminJSON(w, 405, map[string]string{"error": "method not allowed"})
@@ -1452,6 +1683,7 @@ func adminUpstreamModels(w http.ResponseWriter, r *http.Request) {
 		Provider string `json:"provider"`
 		BaseURL  string `json:"baseURL"`
 		Key      string `json:"key"`
+		Site     string `json:"site"`
 		Group    string `json:"group"`
 		Subgroup string `json:"subgroup"`
 		Index    int    `json:"index"`
@@ -1462,7 +1694,7 @@ func adminUpstreamModels(w http.ResponseWriter, r *http.Request) {
 	key := strings.TrimSpace(body.Key)
 	if key == "" {
 		mu.RLock()
-		cur, err := modelAt(&cfg, body.Group, body.Subgroup, body.Index)
+		cur, err := modelAt(&cfg, body.Site, body.Group, body.Subgroup, body.Index)
 		if err == nil {
 			key = cur.Key
 		}

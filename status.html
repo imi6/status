@@ -210,6 +210,7 @@ body{min-height:100vh;background:var(--bg)}
     </div>
   </section>
 
+  <section class="group-switch" id="siteSwitch" hidden></section>
   <section class="group-switch" id="groupSwitch" hidden></section>
   <section class="groups" id="app"><div class="empty">正在读取状态...</div></section>
   <div class="footer" id="pageFooter"></div>
@@ -318,7 +319,49 @@ function segTipText(el){
   }
   return '<b>'+fmtTimeFull(start*1000)+' – '+fmtTimeFull(end*1000)+'</b><div>成功率 '+rate.toFixed(1)+'%</div><div>采样 '+up+'/'+samples+'</div><div>平均延迟 '+delay+'</div>';
 }
-let _group=localStorage.getItem('statusGroup')||'';
+let _site=new URLSearchParams(location.search).get('site')||localStorage.getItem('statusSite')||'';
+let _group=localStorage.getItem('statusGroup:'+_site)||localStorage.getItem('statusGroup')||'';
+function rememberSite(name){
+  _site=name||'';
+  localStorage.setItem('statusSite',_site);
+  const url=new URL(location.href);
+  if(_site)url.searchParams.set('site',_site);
+  else url.searchParams.delete('site');
+  history.replaceState(null,'',url.pathname+url.search+url.hash);
+  const saved=localStorage.getItem('statusGroup:'+_site);
+  if(saved!==null)_group=saved;
+}
+function renderSiteSwitch(sites){
+  const el=document.getElementById('siteSwitch');
+  const names=(sites||[]).map(s=>s.name).filter(Boolean);
+  if(names.length<2){el.hidden=true;el.innerHTML='';return;}
+  if(!_site||names.indexOf(_site)<0)_site=names[0];
+  el.hidden=false;
+  el.innerHTML=names.map(name=>{
+    const active=name===_site?' active':'';
+    return '<button type="button" class="switch-btn'+active+'" data-site="'+escapeHtml(name)+'">'+escapeHtml(name)+'</button>';
+  }).join('');
+}
+function currentSiteBlock(data){
+  const sites=Array.isArray(data&&data.sites)?data.sites:[];
+  if(sites.length){
+    if(!_site||!sites.some(s=>s.name===_site))_site=sites[0].name||'';
+    return sites.find(s=>s.name===_site)||sites[0];
+  }
+  return {name:_site, sections:Array.isArray(data&&data.sections)?data.sections:[]};
+}
+function siteOverall(sections){
+  let down=0,degraded=0,total=0;
+  for(const sec of sections||[])for(const r of sec.rows||[]){
+    if(r.status==='down'){down++;total++;}
+    else if(r.status==='degraded'){degraded++;total++;}
+    else if(r.status==='up')total++;
+  }
+  if(!total)return {status:'unknown',label:'采样中'};
+  if(down)return {status:'down',label:'部分异常'};
+  if(degraded*2>=total)return {status:'degraded',label:'降级'};
+  return {status:'up',label:'运行正常'};
+}
 function visibleSections(sections){
   if(!_group)return sections||[];
   return (sections||[]).filter(sec=>sec.name===_group);
@@ -399,10 +442,13 @@ let _cooldownTimer=null;
 function render(data){
   _lastData=data;
   document.title=data.title||_frontendTitle;
-  const sections=Array.isArray(data.sections)?data.sections:[];
+  const siteBlock=currentSiteBlock(data);
+  rememberSite(siteBlock.name||'');
+  const sections=siteBlock.sections||[];
+  renderSiteSwitch(data.sites);
   renderGroupSwitch(sections);
   const shown=visibleSections(sections);
-  const overall=data.overall||{status:'unknown',label:'采样中'};
+  const overall=siteOverall(shown.length?shown:sections);
   const summary=summarize(shown);
   const dot=document.getElementById('summaryDot');
   dot.className='big-dot '+(overall.status||'unknown');
@@ -432,7 +478,7 @@ function render(data){
   for(const sec of shown){
     const rows=sec.rows||[];
     if(!rows.length)continue;
-    const canRefresh=_manualRefreshGroups.has(sec.name);
+    const canRefresh=_manualRefreshGroups.has((sec.site||_site||'')+'\x1f'+sec.name);
     const refreshBtn=canRefresh?'<button class="refresh-btn" onclick="manualRefresh(this)">刷新</button>':'';
     for(const g of rows){
       const status=g.status||'unknown';
@@ -448,7 +494,7 @@ function render(data){
       const curRate=cur.rate==null?'--':cur.rate.toFixed(1)+'%';
       const rate=win.rate==null?'--':win.rate.toFixed(1)+'%';
       const winLat=win.samples?(win.latency/1000).toFixed(2)+'s':'--';
-      const key=groupName+'|'+(g.sub_name||'')+'|'+(g.name||'');
+      const key=(sec.site||_site||'')+'|'+groupName+'|'+(g.sub_name||'')+'|'+(g.name||'');
       const axis=bars.length?'<div class="time-row"><span>'+fmtAxis(bars[0].start*1000)+'</span><span>'+fmtAxis(bars[Math.floor(bars.length/2)].start*1000)+'</span><span>'+fmtAxis(bucketEndMs(bars[bars.length-1]))+'</span></div>':'';
       output+='<article class="card" data-key="'+escapeHtml(key)+'"><div class="card-head"><span class="big-dot '+status+'"></span><div class="card-title"><div class="name-row"><strong title="'+escapeHtml(cardTitle)+'">'+escapeHtml(cardTitle)+'</strong>'+ratioHtml+'</div><span>'+(g.label||'采样中')+' · '+latency+'</span></div><div class="stat"><span class="k">'+(PERIOD_LABEL[_gran]||'当前')+'</span><span class="v">'+curRate+'</span></div><span class="badge '+status+'">'+(g.label||'采样中')+'</span>'+refreshBtn+'</div><div class="card-body"><div class="track">'+timelineHtml(bars)+'</div>'+axis+'</div></article>';
     }
@@ -457,12 +503,14 @@ function render(data){
   if(_detailKey)paintDetail();
 }
 function findDetail(key){
-  const sections=Array.isArray(_lastData&&_lastData.sections)?_lastData.sections:[];
-  for(const sec of sections){
-    for(const g of sec.rows||[]){
-      const groupName=sec.name||g.sub_name||'';
-      const rowKey=groupName+'|'+(g.sub_name||'')+'|'+(g.name||'');
-      if(rowKey===key)return {sec,g,groupName};
+  const blocks=Array.isArray(_lastData&&_lastData.sites)&&_lastData.sites.length?_lastData.sites:[{name:'',sections:(_lastData&&_lastData.sections)||[]}];
+  for(const block of blocks){
+    for(const sec of block.sections||[]){
+      for(const g of sec.rows||[]){
+        const groupName=sec.name||g.sub_name||'';
+        const rowKey=(sec.site||block.name||'')+'|'+groupName+'|'+(g.sub_name||'')+'|'+(g.name||'');
+        if(rowKey===key)return {sec,g,groupName};
+      }
     }
   }
   return null;
@@ -531,7 +579,7 @@ async function initFrontend(){
     showNotice(f.noticeTitle, f.notice);
     _manualRefreshCooldown=cfg.manualRefreshCooldown||60;
     if(Array.isArray(cfg.groups)){
-      _manualRefreshGroups=new Set(cfg.groups.filter(g=>g.manualRefresh).map(g=>g.name));
+      _manualRefreshGroups=new Set(cfg.groups.filter(g=>g.manualRefresh).map(g=>(g.site||'')+'\x1f'+g.name));
     }
   }catch(e){}
 }
@@ -588,10 +636,18 @@ function updateRefreshButtons(){
     }
   });
 }
+document.getElementById('siteSwitch').addEventListener('click',ev=>{
+  const btn=ev.target.closest('.switch-btn');
+  if(!btn)return;
+  rememberSite(btn.dataset.site||'');
+  _group=localStorage.getItem('statusGroup:'+_site)||'';
+  if(_lastData)render(_lastData);
+});
 document.getElementById('groupSwitch').addEventListener('click',ev=>{
   const btn=ev.target.closest('.switch-btn');
   if(!btn)return;
   _group=btn.dataset.group||'';
+  localStorage.setItem('statusGroup:'+_site,_group);
   localStorage.setItem('statusGroup',_group);
   if(_lastData)render(_lastData);
 });

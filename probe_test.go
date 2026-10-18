@@ -156,7 +156,7 @@ func TestClassifyProbeStatus(t *testing.T) {
 	}
 	check := func(model, wantStatus, wantLabel string) {
 		t.Helper()
-		status, label := classifyProbeStatus("G", "S", model, now)
+		status, label := classifyProbeStatus("", "G", "S", model, now)
 		if status != wantStatus || label != wantLabel {
 			t.Fatalf("%s: got %s %s, want %s %s", model, status, label, wantStatus, wantLabel)
 		}
@@ -212,8 +212,8 @@ func TestHydrateStatusShowsSavedGroups(t *testing.T) {
 	}
 	checked := time.Now().Add(-time.Minute)
 	if _, err := db.Exec(
-		`INSERT INTO checks (group_name, sub_name, model_id, up, latency, checked_at) VALUES (?,?,?,?,?,?)`,
-		"GPT", "GPT Pro", "gpt", 1, 1500, checked.Unix(),
+		`INSERT INTO checks (site_name, group_name, sub_name, model_id, up, latency, checked_at) VALUES (?,?,?,?,?,?,?)`,
+		"监控", "GPT", "GPT Pro", "gpt", 1, 1500, checked.Unix(),
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -269,8 +269,8 @@ func TestClearProbeHistory(t *testing.T) {
 	}
 	checked := time.Now().Add(-time.Minute)
 	if _, err := db.Exec(
-		`INSERT INTO checks (group_name, sub_name, model_id, up, latency, checked_at) VALUES (?,?,?,?,?,?)`,
-		"GPT", "GPT Pro", "gpt", 1, 1500, checked.Unix(),
+		`INSERT INTO checks (site_name, group_name, sub_name, model_id, up, latency, checked_at) VALUES (?,?,?,?,?,?,?)`,
+		"监控", "GPT", "GPT Pro", "gpt", 1, 1500, checked.Unix(),
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -324,7 +324,7 @@ func TestApplyConfigOrder(t *testing.T) {
 		}},
 		{Name: "GLM", Rows: []GroupResp{{Name: "glm", SubName: "GLM"}}},
 	}
-	got := applyConfigOrder(sections, groups)
+	got := applyConfigOrder(sections, []Site{{Groups: groups}})
 	names := []string{got[0].Name, got[1].Name, got[2].Name}
 	if names[0] != "GPT" || names[1] != "GLM" || names[2] != "国模聚合" {
 		t.Fatalf("groups %v", names)

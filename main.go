@@ -45,6 +45,7 @@ type Config struct {
 	Frontend              FrontendConfig `json:"frontend"`
 	Kuma                  KumaConfig     `json:"kuma"`
 	Telegram              TelegramConfig `json:"telegram"`
+	Sites                 []Site         `json:"sites,omitempty"`
 	Groups                []Group        `json:"groups"`
 }
 
@@ -68,6 +69,11 @@ type TelegramButton struct {
 type KumaConfig struct {
 	BaseURL string `json:"baseURL"`
 	Slug    string `json:"slug"`
+}
+
+type Site struct {
+	Name   string  `json:"name"`
+	Groups []Group `json:"groups"`
 }
 
 type Group struct {
@@ -128,8 +134,14 @@ type TimelineBucket struct {
 
 // 按外层group.name分组，返回分组列表和该分组下的所有行
 type Section struct {
+	Site string      `json:"site,omitempty"`
 	Name string      `json:"name"`
 	Rows []GroupResp `json:"rows"`
+}
+
+type SiteStatus struct {
+	Name     string    `json:"name"`
+	Sections []Section `json:"sections"`
 }
 
 type StatusRespV2 struct {
@@ -137,6 +149,7 @@ type StatusRespV2 struct {
 	Overall                OverallStatus `json:"overall"`
 	LastCompletedAt        *time.Time    `json:"last_completed_at,omitempty"`
 	Checking               bool          `json:"checking"`
+	Sites                  []SiteStatus  `json:"sites,omitempty"`
 	Sections               []Section     `json:"sections"`
 	ManualRefreshRemaining int           `json:"manual_refresh_remaining"` // 手动刷新剩余冷却秒数
 }
@@ -170,11 +183,12 @@ func loadConfig() {
 		if ready, err := groupsReady(); err != nil {
 			log.Println("groups ready:", err)
 		} else if ready {
-			groups, err := loadMonitorGroups()
+			sites, err := loadMonitorSites()
 			if err != nil {
-				log.Println("load groups:", err)
+				log.Println("load sites:", err)
 			} else {
-				newCfg.Groups = groups
+				newCfg.Sites = sites
+				newCfg.Groups = nil
 			}
 		}
 	}
@@ -218,16 +232,30 @@ func normalizeConfig(c *Config) {
 	if c.Groups == nil {
 		c.Groups = []Group{}
 	}
-	for i := range c.Groups {
-		if c.Groups[i].SubGroups == nil {
-			c.Groups[i].SubGroups = []SubGroup{}
+	if c.Sites == nil {
+		c.Sites = []Site{}
+	}
+	normalizeGroupList(c.Groups)
+	for i := range c.Sites {
+		c.Sites[i].Name = strings.TrimSpace(c.Sites[i].Name)
+		if c.Sites[i].Groups == nil {
+			c.Sites[i].Groups = []Group{}
 		}
-		for j := range c.Groups[i].SubGroups {
-			if c.Groups[i].SubGroups[j].Models == nil {
-				c.Groups[i].SubGroups[j].Models = []Model{}
+		normalizeGroupList(c.Sites[i].Groups)
+	}
+}
+
+func normalizeGroupList(groups []Group) {
+	for i := range groups {
+		if groups[i].SubGroups == nil {
+			groups[i].SubGroups = []SubGroup{}
+		}
+		for j := range groups[i].SubGroups {
+			if groups[i].SubGroups[j].Models == nil {
+				groups[i].SubGroups[j].Models = []Model{}
 			}
-			for k := range c.Groups[i].SubGroups[j].Models {
-				m := &c.Groups[i].SubGroups[j].Models[k]
+			for k := range groups[i].SubGroups[j].Models {
+				m := &groups[i].SubGroups[j].Models[k]
 				if m.Provider == "" {
 					m.Provider = "openai-compat"
 				}
@@ -237,6 +265,27 @@ func normalizeConfig(c *Config) {
 			}
 		}
 	}
+}
+
+func defaultSiteName(title string) string {
+	title = strings.TrimSpace(title)
+	if title == "" || title == "Service Status" {
+		return "默认站点"
+	}
+	if len([]rune(title)) > 80 || strings.ContainsAny(title, "|\r\n") {
+		return "默认站点"
+	}
+	return title
+}
+
+func configSites(c Config) []Site {
+	if len(c.Sites) > 0 {
+		return c.Sites
+	}
+	if len(c.Groups) == 0 {
+		return nil
+	}
+	return []Site{{Name: defaultSiteName(c.Frontend.Title), Groups: c.Groups}}
 }
 
 func initDB() {
@@ -254,6 +303,7 @@ func ensureSchema() error {
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS checks (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			site_name TEXT NOT NULL DEFAULT '',
 			group_name TEXT NOT NULL,
 			sub_name TEXT NOT NULL,
 			model_id TEXT NOT NULL,
@@ -262,12 +312,19 @@ func ensureSchema() error {
 			checked_at INTEGER NOT NULL
 		);
 		CREATE INDEX IF NOT EXISTS idx_checks_time ON checks(checked_at);
-		CREATE INDEX IF NOT EXISTS idx_checks_group ON checks(group_name, sub_name, model_id, checked_at);
-		CREATE TABLE IF NOT EXISTS monitor_groups (
+		CREATE INDEX IF NOT EXISTS idx_checks_group ON checks(site_name, group_name, sub_name, model_id, checked_at);
+		CREATE TABLE IF NOT EXISTS monitor_sites (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			name TEXT NOT NULL UNIQUE,
-			manual_refresh INTEGER NOT NULL DEFAULT 0,
 			sort_order INTEGER NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS monitor_groups (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			site_id INTEGER NOT NULL DEFAULT 0,
+			name TEXT NOT NULL,
+			manual_refresh INTEGER NOT NULL DEFAULT 0,
+			sort_order INTEGER NOT NULL,
+			UNIQUE(site_id, name)
 		);
 		CREATE TABLE IF NOT EXISTS monitor_subgroups (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -334,8 +391,123 @@ func groupsReady() (bool, error) {
 	return v == "1", nil
 }
 
-func loadMonitorGroups() ([]Group, error) {
-	rows, err := db.Query(`SELECT id, name, manual_refresh FROM monitor_groups ORDER BY sort_order, id`)
+func columnExists(table, column string) (bool, error) {
+	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, typ string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, rows.Err()
+		}
+	}
+	return false, rows.Err()
+}
+
+func ensureSiteSchema(defaultSite string) error {
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS monitor_sites (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT NOT NULL UNIQUE,
+		sort_order INTEGER NOT NULL
+	)`); err != nil {
+		return err
+	}
+	hasSite, err := columnExists("monitor_groups", "site_id")
+	if err != nil {
+		return err
+	}
+	if !hasSite {
+		if err := rebuildGroupsWithSite(defaultSite); err != nil {
+			return err
+		}
+	}
+	hasName, err := columnExists("checks", "site_name")
+	if err != nil {
+		return err
+	}
+	if !hasName {
+		if _, err := db.Exec(`ALTER TABLE checks ADD COLUMN site_name TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_checks_site ON checks(site_name, group_name, sub_name, model_id, checked_at)`); err != nil {
+		return err
+	}
+	_, err = db.Exec(`UPDATE checks SET site_name = ? WHERE site_name = ''`, defaultSite)
+	return err
+}
+
+func rebuildGroupsWithSite(defaultSite string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`INSERT INTO monitor_sites (name, sort_order) VALUES (?, 0)`, defaultSite)
+	if err != nil {
+		return err
+	}
+	siteID, err := res.LastInsertId()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`CREATE TABLE monitor_groups_new (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		site_id INTEGER NOT NULL,
+		name TEXT NOT NULL,
+		manual_refresh INTEGER NOT NULL DEFAULT 0,
+		sort_order INTEGER NOT NULL,
+		UNIQUE(site_id, name)
+	)`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT INTO monitor_groups_new (id, site_id, name, manual_refresh, sort_order)
+		SELECT id, ?, name, manual_refresh, sort_order FROM monitor_groups`, siteID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DROP TABLE monitor_groups`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`ALTER TABLE monitor_groups_new RENAME TO monitor_groups`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func loadMonitorSites() ([]Site, error) {
+	rows, err := db.Query(`SELECT id, name FROM monitor_sites ORDER BY sort_order, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var sites []Site
+	for rows.Next() {
+		var id int
+		var name string
+		if err := rows.Scan(&id, &name); err != nil {
+			return nil, err
+		}
+		groups, err := loadMonitorGroups(id)
+		if err != nil {
+			return nil, err
+		}
+		sites = append(sites, Site{Name: name, Groups: groups})
+	}
+	if sites == nil {
+		sites = []Site{}
+	}
+	return sites, rows.Err()
+}
+
+func loadMonitorGroups(siteID int) ([]Group, error) {
+	rows, err := db.Query(`SELECT id, name, manual_refresh FROM monitor_groups WHERE site_id = ? ORDER BY sort_order, id`, siteID)
 	if err != nil {
 		return nil, err
 	}
@@ -404,7 +576,7 @@ func loadMonitorModels(subgroupID int) ([]Model, error) {
 	return models, rows.Err()
 }
 
-func saveMonitorGroups(groups []Group) error {
+func saveMonitorSites(sites []Site) error {
 	if db == nil {
 		return fmt.Errorf("数据库未就绪")
 	}
@@ -422,31 +594,44 @@ func saveMonitorGroups(groups []Group) error {
 	if _, err := tx.Exec(`DELETE FROM monitor_groups`); err != nil {
 		return err
 	}
-	for i, g := range groups {
-		manual := 0
-		if g.ManualRefresh {
-			manual = 1
-		}
-		res, err := tx.Exec(`INSERT INTO monitor_groups (name, manual_refresh, sort_order) VALUES (?, ?, ?)`, g.Name, manual, i)
+	if _, err := tx.Exec(`DELETE FROM monitor_sites`); err != nil {
+		return err
+	}
+	for i, site := range sites {
+		res, err := tx.Exec(`INSERT INTO monitor_sites (name, sort_order) VALUES (?, ?)`, site.Name, i)
 		if err != nil {
 			return err
 		}
-		gid, err := res.LastInsertId()
+		siteID, err := res.LastInsertId()
 		if err != nil {
 			return err
 		}
-		for j, sg := range g.SubGroups {
-			res, err = tx.Exec(`INSERT INTO monitor_subgroups (group_id, name, kuma_slug, ratio, sort_order) VALUES (?, ?, ?, ?, ?)`, gid, sg.Name, sg.KumaSlug, strings.TrimSpace(sg.Ratio), j)
+		for j, g := range site.Groups {
+			manual := 0
+			if g.ManualRefresh {
+				manual = 1
+			}
+			res, err = tx.Exec(`INSERT INTO monitor_groups (site_id, name, manual_refresh, sort_order) VALUES (?, ?, ?, ?)`, siteID, g.Name, manual, j)
 			if err != nil {
 				return err
 			}
-			sid, err := res.LastInsertId()
+			gid, err := res.LastInsertId()
 			if err != nil {
 				return err
 			}
-			for k, m := range sg.Models {
-				if _, err := tx.Exec(`INSERT INTO monitor_models (subgroup_id, model_id, provider, base_url, api_key, timeout, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?)`, sid, m.ID, m.Provider, m.BaseURL, m.Key, m.Timeout, k); err != nil {
+			for k, sg := range g.SubGroups {
+				res, err = tx.Exec(`INSERT INTO monitor_subgroups (group_id, name, kuma_slug, ratio, sort_order) VALUES (?, ?, ?, ?, ?)`, gid, sg.Name, sg.KumaSlug, strings.TrimSpace(sg.Ratio), k)
+				if err != nil {
 					return err
+				}
+				sid, err := res.LastInsertId()
+				if err != nil {
+					return err
+				}
+				for n, m := range sg.Models {
+					if _, err := tx.Exec(`INSERT INTO monitor_models (subgroup_id, model_id, provider, base_url, api_key, timeout, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?)`, sid, m.ID, m.Provider, m.BaseURL, m.Key, m.Timeout, n); err != nil {
+						return err
+					}
 				}
 			}
 		}
@@ -458,52 +643,67 @@ func saveMonitorGroups(groups []Group) error {
 }
 
 func migrateGroups() {
+	siteName := defaultSiteName(cfg.Frontend.Title)
+	if err := ensureSiteSchema(siteName); err != nil {
+		log.Fatal(err)
+	}
 	ready, err := groupsReady()
 	if err != nil {
 		log.Fatal(err)
 	}
 	if !ready {
 		mu.RLock()
-		groups := append([]Group(nil), cfg.Groups...)
+		sites := configSites(cfg)
 		mu.RUnlock()
-		if err := saveMonitorGroups(groups); err != nil {
+		if len(sites) == 0 {
+			sites = []Site{{Name: siteName, Groups: []Group{}}}
+		}
+		if err := saveMonitorSites(sites); err != nil {
 			log.Fatal(err)
 		}
 		mu.Lock()
 		stored := cfg
 		stored.Groups = []Group{}
+		stored.Sites = nil
 		mu.Unlock()
 		if err := writeConfigFile(stored); err != nil {
 			log.Println("config strip groups:", err)
 		}
 	}
-	groups, err := loadMonitorGroups()
+	sites, err := loadMonitorSites()
 	if err != nil {
 		log.Fatal(err)
 	}
+	if len(sites) == 0 {
+		sites = []Site{{Name: siteName, Groups: []Group{}}}
+		if err := saveMonitorSites(sites); err != nil {
+			log.Fatal(err)
+		}
+	}
 	mu.Lock()
-	cfg.Groups = groups
+	cfg.Sites = sites
+	cfg.Groups = nil
 	mu.Unlock()
 }
 
-func saveCheck(groupName, subName, modelID string, up bool, latency int) {
+func saveCheck(siteName, groupName, subName, modelID string, up bool, latency int) {
 	v := 0
 	if up {
 		v = 1
 	}
 	_, err := db.Exec(
-		"INSERT INTO checks (group_name, sub_name, model_id, up, latency, checked_at) VALUES (?, ?, ?, ?, ?, ?)",
-		groupName, subName, modelID, v, latency, time.Now().Unix(),
+		"INSERT INTO checks (site_name, group_name, sub_name, model_id, up, latency, checked_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		siteName, groupName, subName, modelID, v, latency, time.Now().Unix(),
 	)
 	if err != nil {
 		log.Println("db insert error:", err)
 	}
 }
 
-func getHistory(groupName, subName, modelID string, limit int) []HistoryItem {
+func getHistory(siteName, groupName, subName, modelID string, limit int) []HistoryItem {
 	rows, err := db.Query(
-		"SELECT up, latency, checked_at FROM checks WHERE group_name = ? AND sub_name = ? AND model_id = ? ORDER BY checked_at DESC LIMIT ?",
-		groupName, subName, modelID, limit,
+		"SELECT up, latency, checked_at FROM checks WHERE site_name = ? AND group_name = ? AND sub_name = ? AND model_id = ? ORDER BY checked_at DESC LIMIT ?",
+		siteName, groupName, subName, modelID, limit,
 	)
 	if err != nil {
 		return nil
@@ -544,13 +744,13 @@ type probePoint struct {
 	ts  int64
 }
 
-func loadProbePoints(groupName, subName, modelID string, since int64) []probePoint {
+func loadProbePoints(siteName, groupName, subName, modelID string, since int64) []probePoint {
 	if db == nil {
 		return nil
 	}
 	rows, err := db.Query(
-		`SELECT up, latency, checked_at FROM checks WHERE group_name = ? AND sub_name = ? AND model_id = ? AND checked_at >= ? ORDER BY checked_at`,
-		groupName, subName, modelID, since,
+		`SELECT up, latency, checked_at FROM checks WHERE site_name = ? AND group_name = ? AND sub_name = ? AND model_id = ? AND checked_at >= ? ORDER BY checked_at`,
+		siteName, groupName, subName, modelID, since,
 	)
 	if err != nil {
 		return nil
@@ -568,9 +768,9 @@ func loadProbePoints(groupName, subName, modelID string, since int64) []probePoi
 	return points
 }
 
-func buildTimelines(groupName, subName, modelID string, now time.Time) map[string][]TimelineBucket {
+func buildTimelines(siteName, groupName, subName, modelID string, now time.Time) map[string][]TimelineBucket {
 	since := now.Add(-84 * 24 * time.Hour).Unix()
-	points := loadProbePoints(groupName, subName, modelID, since)
+	points := loadProbePoints(siteName, groupName, subName, modelID, since)
 	return map[string][]TimelineBucket{
 		"hour":  bucketPoints("hour", now, points),
 		"probe": probeBuckets(now, points),
@@ -681,10 +881,10 @@ func weekStart(t time.Time) time.Time {
 	return t.AddDate(0, 0, -(wd - 1))
 }
 
-func calcHealthScore(groupName, subName, modelID string) float64 {
+func calcHealthScore(siteName, groupName, subName, modelID string) float64 {
 	rows, err := db.Query(
-		"SELECT up FROM checks WHERE group_name = ? AND sub_name = ? AND model_id = ? ORDER BY checked_at DESC LIMIT 100",
-		groupName, subName, modelID,
+		"SELECT up FROM checks WHERE site_name = ? AND group_name = ? AND sub_name = ? AND model_id = ? ORDER BY checked_at DESC LIMIT 100",
+		siteName, groupName, subName, modelID,
 	)
 	if err != nil {
 		return 0
@@ -705,13 +905,13 @@ func calcHealthScore(groupName, subName, modelID string) float64 {
 	return float64(upCount) / float64(total) * 100.0
 }
 
-func getLastCheck(groupName, subName, modelID string) (bool, int, time.Time) {
+func getLastCheck(siteName, groupName, subName, modelID string) (bool, int, time.Time) {
 	var up int
 	var lat int
 	var ts int64
 	err := db.QueryRow(
-		"SELECT up, latency, checked_at FROM checks WHERE group_name = ? AND sub_name = ? AND model_id = ? ORDER BY checked_at DESC LIMIT 1",
-		groupName, subName, modelID,
+		"SELECT up, latency, checked_at FROM checks WHERE site_name = ? AND group_name = ? AND sub_name = ? AND model_id = ? ORDER BY checked_at DESC LIMIT 1",
+		siteName, groupName, subName, modelID,
 	).Scan(&up, &lat, &ts)
 	if err != nil {
 		return false, 0, time.Time{}
@@ -720,14 +920,14 @@ func getLastCheck(groupName, subName, modelID string) (bool, int, time.Time) {
 }
 
 // 最近一小时里只要有成功，偶发失败只算降级。连续失败满一小时才算异常。
-func classifyProbeStatus(groupName, subName, modelID string, now time.Time) (string, string) {
+func classifyProbeStatus(siteName, groupName, subName, modelID string, now time.Time) (string, string) {
 	if db == nil {
 		return "unknown", "无采样"
 	}
 	cutoff := now.Add(-time.Hour).Unix()
 	rows, err := db.Query(
-		`SELECT up, checked_at FROM checks WHERE group_name = ? AND sub_name = ? AND model_id = ? AND checked_at >= ? ORDER BY checked_at`,
-		groupName, subName, modelID, cutoff,
+		`SELECT up, checked_at FROM checks WHERE site_name = ? AND group_name = ? AND sub_name = ? AND model_id = ? AND checked_at >= ? ORDER BY checked_at`,
+		siteName, groupName, subName, modelID, cutoff,
 	)
 	if err != nil {
 		return "unknown", "无采样"
@@ -768,8 +968,8 @@ func classifyProbeStatus(groupName, subName, modelID string, now time.Time) (str
 		var prevUp int
 		var prevTs int64
 		err := db.QueryRow(
-			`SELECT up, checked_at FROM checks WHERE group_name = ? AND sub_name = ? AND model_id = ? AND checked_at < ? ORDER BY checked_at DESC LIMIT 1`,
-			groupName, subName, modelID, cutoff,
+			`SELECT up, checked_at FROM checks WHERE site_name = ? AND group_name = ? AND sub_name = ? AND model_id = ? AND checked_at < ? ORDER BY checked_at DESC LIMIT 1`,
+			siteName, groupName, subName, modelID, cutoff,
 		).Scan(&prevUp, &prevTs)
 		if err == nil && prevUp == 0 {
 			streakStart = prevTs
@@ -833,15 +1033,15 @@ func clearProbeHistory() (int64, error) {
 	return n, nil
 }
 
-func refreshRowFromHistory(group string, row *GroupResp, now time.Time) {
-	statusStr, label := classifyProbeStatus(group, row.SubName, row.Name, now)
-	_, lat, lastAt := getLastCheck(group, row.SubName, row.Name)
+func refreshRowFromHistory(site, group string, row *GroupResp, now time.Time) {
+	statusStr, label := classifyProbeStatus(site, group, row.SubName, row.Name, now)
+	_, lat, lastAt := getLastCheck(site, group, row.SubName, row.Name)
 	row.Status = statusStr
 	row.Label = label
-	row.HealthScore = calcHealthScore(group, row.SubName, row.Name)
+	row.HealthScore = calcHealthScore(site, group, row.SubName, row.Name)
 	row.LatencyMs = lat
-	row.History = getHistory(group, row.SubName, row.Name, 120)
-	row.Timelines = buildTimelines(group, row.SubName, row.Name, now)
+	row.History = getHistory(site, group, row.SubName, row.Name, 120)
+	row.Timelines = buildTimelines(site, group, row.SubName, row.Name, now)
 	if lastAt.IsZero() {
 		row.LastCheckedAt = nil
 	} else {
@@ -859,7 +1059,7 @@ func ensureFreshHistory(sections []Section) {
 	now := time.Now()
 	for i := range sections {
 		for j := range sections[i].Rows {
-			refreshRowFromHistory(sections[i].Name, &sections[i].Rows[j], now)
+			refreshRowFromHistory(sections[i].Site, sections[i].Name, &sections[i].Rows[j], now)
 		}
 	}
 	atomic.StoreUint64(&appliedHistoryEpoch, epoch)
@@ -1148,8 +1348,8 @@ func providerFamily(p string) string {
 	}
 }
 
-func snapshotRow(gName string, sg SubGroup, m Model, lat int, lastAt, now time.Time) GroupResp {
-	statusStr, label := classifyProbeStatus(gName, sg.Name, m.ID, now)
+func snapshotRow(site, gName string, sg SubGroup, m Model, lat int, lastAt, now time.Time) GroupResp {
+	statusStr, label := classifyProbeStatus(site, gName, sg.Name, m.ID, now)
 	row := GroupResp{
 		Name:        m.ID,
 		SubName:     sg.Name,
@@ -1157,10 +1357,10 @@ func snapshotRow(gName string, sg SubGroup, m Model, lat int, lastAt, now time.T
 		Family:      providerFamily(m.Provider),
 		Status:      statusStr,
 		Label:       label,
-		HealthScore: calcHealthScore(gName, sg.Name, m.ID),
+		HealthScore: calcHealthScore(site, gName, sg.Name, m.ID),
 		LatencyMs:   lat,
-		History:     getHistory(gName, sg.Name, m.ID, 120),
-		Timelines:   buildTimelines(gName, sg.Name, m.ID, now),
+		History:     getHistory(site, gName, sg.Name, m.ID, 120),
+		Timelines:   buildTimelines(site, gName, sg.Name, m.ID, now),
 	}
 	if !lastAt.IsZero() {
 		row.LastCheckedAt = &lastAt
@@ -1174,45 +1374,48 @@ func hydrateStatus() {
 		return
 	}
 	mu.RLock()
-	groups := append([]Group(nil), cfg.Groups...)
+	sites := configSites(cfg)
 	title := cfg.Frontend.Title
 	mu.RUnlock()
 	now := time.Now()
-	sections := make([]Section, 0, len(groups))
-	for _, g := range groups {
-		var rows []GroupResp
-		for _, sg := range g.SubGroups {
-			for _, m := range sg.Models {
-				_, lat, lastAt := getLastCheck(g.Name, sg.Name, m.ID)
-				rows = append(rows, snapshotRow(g.Name, sg, m, lat, lastAt, now))
+	var sections []Section
+	for _, site := range sites {
+		for _, g := range site.Groups {
+			var rows []GroupResp
+			for _, sg := range g.SubGroups {
+				for _, m := range sg.Models {
+					_, lat, lastAt := getLastCheck(site.Name, g.Name, sg.Name, m.ID)
+					rows = append(rows, snapshotRow(site.Name, g.Name, sg, m, lat, lastAt, now))
+				}
+			}
+			if len(rows) > 0 {
+				sections = append(sections, Section{Site: site.Name, Name: g.Name, Rows: rows})
 			}
 		}
-		if len(rows) > 0 {
-			sections = append(sections, Section{Name: g.Name, Rows: rows})
-		}
 	}
-	sections = applyConfigOrder(sections, groups)
+	sections = applyConfigOrder(sections, sites)
 	overallStatus, overallLabel := overallFromRows(sections)
 	mu.Lock()
 	statusV2 = StatusRespV2{
 		Title:    title,
 		Overall:  OverallStatus{Status: overallStatus, Label: overallLabel},
 		Checking: false,
+		Sites:    packSites(sections, sites),
 		Sections: sections,
 	}
 	mu.Unlock()
 }
 
 // updateRow 检测完一个模型后立即更新共享状态，前端轮询可见
-func updateRow(gName string, sg SubGroup, m Model, sections *[]Section, up bool, lat int) {
+func updateRow(site, gName string, sg SubGroup, m Model, sections *[]Section, up bool, lat int) {
 	_ = up
-	_, _, lastAt := getLastCheck(gName, sg.Name, m.ID)
-	row := snapshotRow(gName, sg, m, lat, lastAt, time.Now())
+	_, _, lastAt := getLastCheck(site, gName, sg.Name, m.ID)
+	row := snapshotRow(site, gName, sg, m, lat, lastAt, time.Now())
 
 	mu.Lock()
 	ensureFreshHistory(*sections)
-	*sections = upsertSectionRow(*sections, gName, row)
-	*sections = applyConfigOrder(*sections, cfg.Groups)
+	*sections = upsertSectionRow(*sections, site, gName, row)
+	*sections = applyConfigOrder(*sections, configSites(cfg))
 	applyLiveRatios(*sections)
 
 	overallStatus, overallLabel := overallFromRows(*sections)
@@ -1221,22 +1424,54 @@ func updateRow(gName string, sg SubGroup, m Model, sections *[]Section, up bool,
 		Title:    cfg.Frontend.Title,
 		Overall:  OverallStatus{Status: overallStatus, Label: overallLabel},
 		Checking: true,
+		Sites:    packSites(*sections, configSites(cfg)),
 		Sections: *sections,
 	}
 	mu.Unlock()
 }
 
+func packSites(sections []Section, sites []Site) []SiteStatus {
+	grouped := map[string][]Section{}
+	var extra []string
+	for _, sec := range sections {
+		if _, ok := grouped[sec.Site]; !ok {
+			extra = append(extra, sec.Site)
+		}
+		grouped[sec.Site] = append(grouped[sec.Site], sec)
+	}
+	var out []SiteStatus
+	seen := map[string]bool{}
+	for _, site := range sites {
+		seen[site.Name] = true
+		secs := grouped[site.Name]
+		if secs == nil {
+			secs = []Section{}
+		}
+		out = append(out, SiteStatus{Name: site.Name, Sections: secs})
+	}
+	for _, name := range extra {
+		if seen[name] {
+			continue
+		}
+		out = append(out, SiteStatus{Name: name, Sections: grouped[name]})
+	}
+	if out == nil {
+		out = []SiteStatus{}
+	}
+	return out
+}
+
 // upsertSectionRow 在 sections 中插入或更新一行，用于逐个检测时实时更新前端
-func upsertSectionRow(sections []Section, gName string, row GroupResp) []Section {
+func upsertSectionRow(sections []Section, site, gName string, row GroupResp) []Section {
 	idx := -1
 	for i, sec := range sections {
-		if sec.Name == gName {
+		if sec.Site == site && sec.Name == gName {
 			idx = i
 			break
 		}
 	}
 	if idx == -1 {
-		return append(sections, Section{Name: gName, Rows: []GroupResp{row}})
+		return append(sections, Section{Site: site, Name: gName, Rows: []GroupResp{row}})
 	}
 	sec := &sections[idx]
 	for i, r := range sec.Rows {
@@ -1250,40 +1485,55 @@ func upsertSectionRow(sections []Section, gName string, row GroupResp) []Section
 }
 
 // applyConfigOrder 让状态页分组、子组和模型顺序跟后台保存的顺序一致。
-func applyConfigOrder(sections []Section, groups []Group) []Section {
-	groupIndex := make(map[string]int, len(groups))
+func applyConfigOrder(sections []Section, sites []Site) []Section {
+	siteIndex := make(map[string]int, len(sites))
+	groupIndex := make(map[string]int)
 	type rank struct{ sub, model int }
 	rowIndex := make(map[string]rank)
-	for i, g := range groups {
-		groupIndex[g.Name] = i
-		for j, sg := range g.SubGroups {
-			for k, m := range sg.Models {
-				rowIndex[g.Name+"\x1f"+sg.Name+"\x1f"+m.ID] = rank{j, k}
+	for i, site := range sites {
+		siteIndex[site.Name] = i
+		for j, g := range site.Groups {
+			groupIndex[site.Name+"\x1f"+g.Name] = j
+			for k, sg := range g.SubGroups {
+				for n, m := range sg.Models {
+					rowIndex[site.Name+"\x1f"+g.Name+"\x1f"+sg.Name+"\x1f"+m.ID] = rank{k, n}
+				}
 			}
 		}
 	}
 	sort.SliceStable(sections, func(a, b int) bool {
-		ia, oka := groupIndex[sections[a].Name]
-		ib, okb := groupIndex[sections[b].Name]
+		sa, oka := siteIndex[sections[a].Site]
+		sb, okb := siteIndex[sections[b].Site]
 		if !oka {
-			ia = len(groups)
+			sa = len(sites)
 		}
 		if !okb {
-			ib = len(groups)
+			sb = len(sites)
 		}
-		return ia < ib
+		if sa != sb {
+			return sa < sb
+		}
+		ga, oka := groupIndex[sections[a].Site+"\x1f"+sections[a].Name]
+		gb, okb := groupIndex[sections[b].Site+"\x1f"+sections[b].Name]
+		if !oka {
+			ga = len(sites) + 1
+		}
+		if !okb {
+			gb = len(sites) + 1
+		}
+		return ga < gb
 	})
 	for i := range sections {
 		rows := sections[i].Rows
-		gName := sections[i].Name
+		prefix := sections[i].Site + "\x1f" + sections[i].Name + "\x1f"
 		sort.SliceStable(rows, func(a, b int) bool {
-			ka, oka := rowIndex[gName+"\x1f"+rows[a].SubName+"\x1f"+rows[a].Name]
-			kb, okb := rowIndex[gName+"\x1f"+rows[b].SubName+"\x1f"+rows[b].Name]
+			ka, oka := rowIndex[prefix+rows[a].SubName+"\x1f"+rows[a].Name]
+			kb, okb := rowIndex[prefix+rows[b].SubName+"\x1f"+rows[b].Name]
 			if !oka {
-				ka = rank{len(groups) + 1, len(groups) + 1}
+				ka = rank{len(sites) + 1, len(sites) + 1}
 			}
 			if !okb {
-				kb = rank{len(groups) + 1, len(groups) + 1}
+				kb = rank{len(sites) + 1, len(sites) + 1}
 			}
 			if ka.sub != kb.sub {
 				return ka.sub < kb.sub
@@ -1298,14 +1548,20 @@ func applyConfigOrder(sections []Section, groups []Group) []Section {
 // applyLiveRatios 把后台刚保存的倍率写进已经展示的卡片，不必等下一轮探测。
 func applyLiveRatios(sections []Section) {
 	ratios := make(map[string]string)
-	for _, g := range cfg.Groups {
-		for _, sg := range g.SubGroups {
-			ratios[g.Name+"\x1f"+sg.Name] = strings.TrimSpace(sg.Ratio)
+	for _, site := range configSites(cfg) {
+		for _, g := range site.Groups {
+			for _, sg := range g.SubGroups {
+				ratios[site.Name+"\x1f"+g.Name+"\x1f"+sg.Name] = strings.TrimSpace(sg.Ratio)
+			}
 		}
 	}
 	for i := range sections {
+		siteName := sections[i].Site
+		if siteName == "" && len(configSites(cfg)) == 1 {
+			siteName = configSites(cfg)[0].Name
+		}
 		for j := range sections[i].Rows {
-			key := sections[i].Name + "\x1f" + sections[i].Rows[j].SubName
+			key := siteName + "\x1f" + sections[i].Name + "\x1f" + sections[i].Rows[j].SubName
 			if ratio, ok := ratios[key]; ok {
 				sections[i].Rows[j].Ratio = ratio
 			}
@@ -1319,7 +1575,7 @@ func syncLiveRatios() {
 	mu.Unlock()
 }
 
-func renameLiveSubgroup(group, oldName, newName string) {
+func renameLiveSite(oldName, newName string) {
 	oldName = strings.TrimSpace(oldName)
 	newName = strings.TrimSpace(newName)
 	if oldName == "" || oldName == newName {
@@ -1328,7 +1584,23 @@ func renameLiveSubgroup(group, oldName, newName string) {
 	mu.Lock()
 	defer mu.Unlock()
 	for i := range statusV2.Sections {
-		if statusV2.Sections[i].Name != group {
+		if statusV2.Sections[i].Site == oldName {
+			statusV2.Sections[i].Site = newName
+		}
+	}
+	statusV2.Sites = packSites(statusV2.Sections, configSites(cfg))
+}
+
+func renameLiveSubgroup(site, group, oldName, newName string) {
+	oldName = strings.TrimSpace(oldName)
+	newName = strings.TrimSpace(newName)
+	if oldName == "" || oldName == newName {
+		return
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for i := range statusV2.Sections {
+		if statusV2.Sections[i].Site != site || statusV2.Sections[i].Name != group {
 			continue
 		}
 		for j := range statusV2.Sections[i].Rows {
@@ -1339,17 +1611,25 @@ func renameLiveSubgroup(group, oldName, newName string) {
 	}
 }
 
-func reorderSections(names []string) {
+func reorderSections(site string, names []string) {
 	index := make(map[string]int, len(names))
 	for i, name := range names {
 		index[strings.TrimSpace(name)] = i
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	sections := statusV2.Sections
-	sort.SliceStable(sections, func(a, b int) bool {
-		ia, oka := index[sections[a].Name]
-		ib, okb := index[sections[b].Name]
+	var picked []Section
+	var slots []int
+	for i, sec := range statusV2.Sections {
+		if sec.Site != site {
+			continue
+		}
+		slots = append(slots, i)
+		picked = append(picked, sec)
+	}
+	sort.SliceStable(picked, func(a, b int) bool {
+		ia, oka := index[picked[a].Name]
+		ib, okb := index[picked[b].Name]
 		if !oka {
 			ia = len(names)
 		}
@@ -1358,10 +1638,13 @@ func reorderSections(names []string) {
 		}
 		return ia < ib
 	})
-	statusV2.Sections = sections
+	for n, i := range slots {
+		statusV2.Sections[i] = picked[n]
+	}
+	statusV2.Sites = packSites(statusV2.Sections, configSites(cfg))
 }
 
-func reorderSectionRows(group string, names []string) {
+func reorderSectionRows(site, group string, names []string) {
 	index := make(map[string]int, len(names))
 	for i, name := range names {
 		index[strings.TrimSpace(name)] = i
@@ -1369,7 +1652,7 @@ func reorderSectionRows(group string, names []string) {
 	mu.Lock()
 	defer mu.Unlock()
 	for i := range statusV2.Sections {
-		if statusV2.Sections[i].Name != group {
+		if statusV2.Sections[i].Site != site || statusV2.Sections[i].Name != group {
 			continue
 		}
 		rows := statusV2.Sections[i].Rows
@@ -1386,16 +1669,18 @@ func reorderSectionRows(group string, names []string) {
 		})
 		statusV2.Sections[i].Rows = rows
 	}
+	statusV2.Sites = packSites(statusV2.Sections, configSites(cfg))
 }
 
 // pruneStaleSections 根据 config 当前条目移除 sections 中已不存在的 group/subGroup/model 行
 func pruneStaleSections(sections []Section, cfg Config) []Section {
-	// 建立 config 中有效条目的集合: "groupName|subName|modelID"
 	valid := make(map[string]bool)
-	for _, g := range cfg.Groups {
-		for _, sg := range g.SubGroups {
-			for _, m := range sg.Models {
-				valid[g.Name+"|"+sg.Name+"|"+m.ID] = true
+	for _, site := range configSites(cfg) {
+		for _, g := range site.Groups {
+			for _, sg := range g.SubGroups {
+				for _, m := range sg.Models {
+					valid[site.Name+"|"+g.Name+"|"+sg.Name+"|"+m.ID] = true
+				}
 			}
 		}
 	}
@@ -1404,13 +1689,13 @@ func pruneStaleSections(sections []Section, cfg Config) []Section {
 	for _, sec := range sections {
 		var keptRows []GroupResp
 		for _, row := range sec.Rows {
-			key := sec.Name + "|" + row.SubName + "|" + row.Name
+			key := sec.Site + "|" + sec.Name + "|" + row.SubName + "|" + row.Name
 			if valid[key] {
 				keptRows = append(keptRows, row)
 			}
 		}
 		if len(keptRows) > 0 {
-			result = append(result, Section{Name: sec.Name, Rows: keptRows})
+			result = append(result, Section{Site: sec.Site, Name: sec.Name, Rows: keptRows})
 		}
 	}
 	return result
@@ -1433,7 +1718,7 @@ func refresh() {
 	prevOverall := statusV2.Overall.Status
 	for _, sec := range statusV2.Sections {
 		for _, r := range sec.Rows {
-			prevRows[sec.Name+"\x1f"+r.SubName+"\x1f"+r.Name] = r.Status
+			prevRows[rowStatusKey(sec, r)] = r.Status
 		}
 	}
 	mu.RUnlock()
@@ -1450,9 +1735,10 @@ func refresh() {
 	sections = pruneStaleSections(sections, cfg)
 	mu.Lock()
 	ensureFreshHistory(sections)
-	sections = applyConfigOrder(sections, cfg.Groups)
+	sections = applyConfigOrder(sections, configSites(cfg))
 	applyLiveRatios(sections)
 	statusV2.Sections = sections
+	statusV2.Sites = packSites(sections, configSites(cfg))
 	mu.Unlock()
 
 	now := time.Now()
@@ -1461,24 +1747,26 @@ func refresh() {
 
 	// failRecords 记录首次失败的模型，等全部测完再统一重试
 	type failRecord struct {
-		gName, sgName, ratio string
-		m                    Model
-		lat                  int
+		site, gName, sgName, ratio string
+		m                          Model
+		lat                         int
 	}
 	var failRecords []failRecord
 
 	// 逐个检测所有模型，失败的暂不记录，先收集
-	for _, g := range cfg.Groups {
-		for _, sg := range g.SubGroups {
-			for _, m := range sg.Models {
-				up, lat := checkOne(m)
-				if up {
-					saveCheck(g.Name, sg.Name, m.ID, true, lat)
-					totalLat += lat
-					latCount++
-					updateRow(g.Name, sg, m, &sections, true, lat)
-				} else {
-					failRecords = append(failRecords, failRecord{gName: g.Name, sgName: sg.Name, ratio: sg.Ratio, m: m, lat: lat})
+	for _, site := range configSites(cfg) {
+		for _, g := range site.Groups {
+			for _, sg := range g.SubGroups {
+				for _, m := range sg.Models {
+					up, lat := checkOne(m)
+					if up {
+						saveCheck(site.Name, g.Name, sg.Name, m.ID, true, lat)
+						totalLat += lat
+						latCount++
+						updateRow(site.Name, g.Name, sg, m, &sections, true, lat)
+					} else {
+						failRecords = append(failRecords, failRecord{site: site.Name, gName: g.Name, sgName: sg.Name, ratio: sg.Ratio, m: m, lat: lat})
+					}
 				}
 			}
 		}
@@ -1489,19 +1777,19 @@ func refresh() {
 		time.Sleep(5 * time.Second)
 		for _, fr := range failRecords {
 			up, lat := checkOne(fr.m)
-			saveCheck(fr.gName, fr.sgName, fr.m.ID, up, lat)
+			saveCheck(fr.site, fr.gName, fr.sgName, fr.m.ID, up, lat)
 			if up {
 				totalLat += lat
 				latCount++
 			}
-			updateRow(fr.gName, SubGroup{Name: fr.sgName, Ratio: fr.ratio}, fr.m, &sections, up, lat)
+			updateRow(fr.site, fr.gName, SubGroup{Name: fr.sgName, Ratio: fr.ratio}, fr.m, &sections, up, lat)
 		}
 	}
 
 	// 全部检测完毕，标记 checking = false
 	mu.Lock()
 	ensureFreshHistory(sections)
-	sections = applyConfigOrder(sections, cfg.Groups)
+	sections = applyConfigOrder(sections, configSites(cfg))
 	applyLiveRatios(sections)
 	overallStatus, overallLabel := overallFromRows(sections)
 	statusV2 = StatusRespV2{
@@ -1509,6 +1797,7 @@ func refresh() {
 		Overall:         OverallStatus{Status: overallStatus, Label: overallLabel},
 		LastCompletedAt: &now,
 		Checking:        false,
+		Sites:           packSites(sections, configSites(cfg)),
 		Sections:        sections,
 	}
 	checking = false
@@ -1525,15 +1814,16 @@ func refresh() {
 	}
 	// 2. 推送每个子组的独立状态
 	if cfg.Kuma.BaseURL != "" {
-		for _, g := range cfg.Groups {
-			for _, sg := range g.SubGroups {
+		for _, site := range configSites(cfg) {
+			for _, g := range site.Groups {
+				for _, sg := range g.SubGroups {
 				if sg.KumaSlug != "" {
 					var sgLatSum, sgLatCount int
 					sgUp := len(sg.Models) > 0
 					for _, m := range sg.Models {
 						found := false
 						for _, sec := range sections {
-							if sec.Name != g.Name {
+							if sec.Site != site.Name || sec.Name != g.Name {
 								continue
 							}
 							for _, r := range sec.Rows {
@@ -1548,7 +1838,7 @@ func refresh() {
 						if !found {
 							sgUp = false
 						}
-						if _, lat, at := getLastCheck(g.Name, sg.Name, m.ID); !at.IsZero() {
+						if _, lat, at := getLastCheck(site.Name, g.Name, sg.Name, m.ID); !at.IsZero() {
 							sgLatSum += lat
 							sgLatCount++
 						}
@@ -1558,6 +1848,7 @@ func refresh() {
 						sgAvgPing = sgLatSum / sgLatCount
 					}
 					pingKuma(sg.KumaSlug, sgUp, sgAvgPing)
+				}
 				}
 			}
 		}
@@ -1650,6 +1941,14 @@ type telegramQueue struct {
 
 var tgQueue telegramQueue
 
+func rowStatusKey(sec Section, row GroupResp) string {
+	key := sec.Name + "\x1f" + row.SubName + "\x1f" + row.Name
+	if sec.Site != "" {
+		key = sec.Site + "\x1f" + key
+	}
+	return key
+}
+
 func telegramDigest(prev map[string]string, prevOverall string, sections []Section, overall, overallLabel string) string {
 	items, of, ot, ol := collectTelegram(prev, prevOverall, sections, overall, overallLabel)
 	return formatTelegram(items, of, ot, ol)
@@ -1662,7 +1961,7 @@ func collectTelegram(prev map[string]string, prevOverall string, sections []Sect
 	var items []tgItem
 	for _, sec := range sections {
 		for _, r := range sec.Rows {
-			old, ok := prev[sec.Name+"\x1f"+r.SubName+"\x1f"+r.Name]
+			old, ok := prev[rowStatusKey(sec, r)]
 			if !ok || old == "" || old == r.Status {
 				continue
 			}
@@ -2272,10 +2571,10 @@ type HeartbeatPublic struct {
 }
 
 // getHeartbeats 查询最近 limit 条心跳记录，返回按时间正序排列
-func getHeartbeats(groupName, subName, modelID string, limit int) []HeartbeatPublic {
+func getHeartbeats(siteName, groupName, subName, modelID string, limit int) []HeartbeatPublic {
 	rows, err := db.Query(
-		"SELECT up, latency, checked_at FROM checks WHERE group_name = ? AND sub_name = ? AND model_id = ? ORDER BY checked_at DESC LIMIT ?",
-		groupName, subName, modelID, limit,
+		"SELECT up, latency, checked_at FROM checks WHERE site_name = ? AND group_name = ? AND sub_name = ? AND model_id = ? ORDER BY checked_at DESC LIMIT ?",
+		siteName, groupName, subName, modelID, limit,
 	)
 	if err != nil {
 		return nil
@@ -2305,12 +2604,12 @@ func getHeartbeats(groupName, subName, modelID string, limit int) []HeartbeatPub
 }
 
 // calcUptime24h 计算 24 小时内的 uptime（0~1）
-func calcUptime24h(groupName, subName, modelID string) float64 {
+func calcUptime24h(siteName, groupName, subName, modelID string) float64 {
 	cutoff := time.Now().Add(-24 * time.Hour).Unix()
 	var total, upCount int
 	rows, err := db.Query(
-		"SELECT up FROM checks WHERE group_name = ? AND sub_name = ? AND model_id = ? AND checked_at >= ?",
-		groupName, subName, modelID, cutoff,
+		"SELECT up FROM checks WHERE site_name = ? AND group_name = ? AND sub_name = ? AND model_id = ? AND checked_at >= ?",
+		siteName, groupName, subName, modelID, cutoff,
 	)
 	if err != nil {
 		return 1.0
@@ -2332,6 +2631,7 @@ func calcUptime24h(groupName, subName, modelID string) float64 {
 
 // monitorRef 记录一个模型的分组上下文和分配的 monitor ID
 type monitorRef struct {
+	SiteName  string
 	GroupName string
 	SubName   string
 	ModelID   string
@@ -2346,11 +2646,13 @@ func collectMonitorRefs(cfg Config, slug string) []monitorRef {
 	// 检查是否为 overall slug
 	if slug == cfg.Kuma.Slug {
 		id := 1
-		for _, g := range cfg.Groups {
-			for _, sg := range g.SubGroups {
-				for _, m := range sg.Models {
-					refs = append(refs, monitorRef{g.Name, sg.Name, m.ID, id})
-					id++
+		for _, site := range configSites(cfg) {
+			for _, g := range site.Groups {
+				for _, sg := range g.SubGroups {
+					for _, m := range sg.Models {
+						refs = append(refs, monitorRef{site.Name, g.Name, sg.Name, m.ID, id})
+						id++
+					}
 				}
 			}
 		}
@@ -2358,13 +2660,15 @@ func collectMonitorRefs(cfg Config, slug string) []monitorRef {
 	}
 
 	// 查找子组 slug
-	for _, g := range cfg.Groups {
-		for _, sg := range g.SubGroups {
-			if sg.KumaSlug == slug {
-				for i, m := range sg.Models {
-					refs = append(refs, monitorRef{g.Name, sg.Name, m.ID, i + 1})
+	for _, site := range configSites(cfg) {
+		for _, g := range site.Groups {
+			for _, sg := range g.SubGroups {
+				if sg.KumaSlug == slug {
+					for i, m := range sg.Models {
+						refs = append(refs, monitorRef{site.Name, g.Name, sg.Name, m.ID, i + 1})
+					}
+					return refs
 				}
-				return refs
 			}
 		}
 	}
@@ -2383,6 +2687,9 @@ func writeJSON(w http.ResponseWriter, code int, v interface{}) {
 func apiStatus(w http.ResponseWriter, r *http.Request) {
 	mu.RLock()
 	s := statusV2
+	if s.Sites == nil {
+		s.Sites = packSites(s.Sections, configSites(cfg))
+	}
 	c := checking
 	cooldown := cfg.ManualRefreshCooldown
 	if cooldown == 0 {
@@ -2415,12 +2722,18 @@ func apiConfig(w http.ResponseWriter, r *http.Request) {
 	if cooldown == 0 {
 		cooldown = 60
 	}
-	groupSettings := make([]map[string]interface{}, 0, len(cfg.Groups))
-	for _, g := range cfg.Groups {
-		groupSettings = append(groupSettings, map[string]interface{}{
-			"name":          g.Name,
-			"manualRefresh": g.ManualRefresh,
-		})
+	var groupSettings []map[string]interface{}
+	for _, site := range configSites(cfg) {
+		for _, g := range site.Groups {
+			groupSettings = append(groupSettings, map[string]interface{}{
+				"site":          site.Name,
+				"name":          g.Name,
+				"manualRefresh": g.ManualRefresh,
+			})
+		}
+	}
+	if groupSettings == nil {
+		groupSettings = []map[string]interface{}{}
 	}
 	mu.RUnlock()
 	writeJSON(w, 200, map[string]interface{}{
@@ -2705,12 +3018,12 @@ func apiStatusPageHeartbeat(w http.ResponseWriter, r *http.Request) {
 
 	for _, ref := range refs {
 		monitorIDStr := strconv.Itoa(ref.MonitorID)
-		hbs := getHeartbeats(ref.GroupName, ref.SubName, ref.ModelID, 100)
+		hbs := getHeartbeats(ref.SiteName, ref.GroupName, ref.SubName, ref.ModelID, 100)
 		if hbs == nil {
 			hbs = []HeartbeatPublic{}
 		}
 		heartbeatList[monitorIDStr] = hbs
-		uptimeList[monitorIDStr+"_24"] = calcUptime24h(ref.GroupName, ref.SubName, ref.ModelID)
+		uptimeList[monitorIDStr+"_24"] = calcUptime24h(ref.SiteName, ref.GroupName, ref.SubName, ref.ModelID)
 	}
 
 	writeJSON(w, 200, map[string]interface{}{

@@ -29,7 +29,7 @@ func TestUpdateModelKeepsKeyWhenBlank(t *testing.T) {
 			}},
 		}},
 	}}}
-	err := updateModel(&c, "G", "S", 0, Model{
+	err := updateModel(&c, "", "G", "S", 0, Model{
 		ID: "m", Provider: "openai-compat", BaseURL: "https://api.example.com/v1/", Key: "", Timeout: 30,
 	})
 	if err != nil {
@@ -46,20 +46,20 @@ func TestUpdateModelKeepsKeyWhenBlank(t *testing.T) {
 
 func TestAddModelRejectsBadURLAndDuplicate(t *testing.T) {
 	c := Config{Groups: []Group{{Name: "G", SubGroups: []SubGroup{{Name: "S", Models: []Model{}}}}}}
-	err := addModel(&c, "G", "S", Model{ID: `bad"id`, Provider: "openai-compat", BaseURL: "https://api.example.com/v1", Key: "k", Timeout: 30})
+	err := addModel(&c, "", "G", "S", Model{ID: `bad"id`, Provider: "openai-compat", BaseURL: "https://api.example.com/v1", Key: "k", Timeout: 30})
 	if err == nil {
 		t.Fatal("expected invalid id")
 	}
-	if err := addModel(&c, "G", "S", Model{ID: "m", Provider: "nope", BaseURL: "https://api.example.com", Key: "k"}); err == nil {
+	if err := addModel(&c, "", "G", "S", Model{ID: "m", Provider: "nope", BaseURL: "https://api.example.com", Key: "k"}); err == nil {
 		t.Fatal("expected invalid provider")
 	}
-	if err := addModel(&c, "G", "S", Model{ID: "m", BaseURL: "ftp://api.example.com", Key: "k"}); err == nil {
+	if err := addModel(&c, "", "G", "S", Model{ID: "m", BaseURL: "ftp://api.example.com", Key: "k"}); err == nil {
 		t.Fatal("expected invalid url")
 	}
-	if err := addModel(&c, "G", "S", Model{ID: "m", BaseURL: "https://api.example.com/v1", Key: "k"}); err != nil {
+	if err := addModel(&c, "", "G", "S", Model{ID: "m", BaseURL: "https://api.example.com/v1", Key: "k"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := addModel(&c, "G", "S", Model{ID: "m", BaseURL: "https://api.example.com/v1", Key: "k2"}); err == nil {
+	if err := addModel(&c, "", "G", "S", Model{ID: "m", BaseURL: "https://api.example.com/v1", Key: "k2"}); err == nil {
 		t.Fatal("expected duplicate")
 	}
 }
@@ -476,22 +476,38 @@ func TestTelegramLogNewestFirst(t *testing.T) {
 	}
 }
 
+func TestSameGroupNameOnTwoSites(t *testing.T) {
+	c := Config{Sites: []Site{{Name: "甲", Groups: []Group{}}, {Name: "乙", Groups: []Group{}}}}
+	if err := addGroup(&c, "甲", "GPT", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := addGroup(&c, "乙", "GPT", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := addGroup(&c, "甲", "GPT", false); err == nil {
+		t.Fatal("expected duplicate group in the same site")
+	}
+	if c.Sites[0].Groups[0].Name != "GPT" || c.Sites[1].Groups[0].Name != "GPT" {
+		t.Fatalf("%+v", c.Sites)
+	}
+}
+
 func TestReorderGroups(t *testing.T) {
 	c := Config{Groups: []Group{{Name: "GPT"}, {Name: "Claude", SubGroups: []SubGroup{{Name: "Max"}}}, {Name: "Grok"}}}
-	if err := reorderGroups(&c, []string{"Grok", "GPT", "Claude"}); err != nil {
+	if err := reorderGroups(&c, "", []string{"Grok", "GPT", "Claude"}); err != nil {
 		t.Fatal(err)
 	}
 	if c.Groups[0].Name != "Grok" || c.Groups[1].Name != "GPT" || c.Groups[2].SubGroups[0].Name != "Max" {
 		t.Fatalf("%s %s", c.Groups[0].Name, c.Groups[2].Name)
 	}
-	if err := reorderGroups(&c, []string{"Grok"}); err == nil {
+	if err := reorderGroups(&c, "", []string{"Grok"}); err == nil {
 		t.Fatal("expected incomplete order")
 	}
 	mu.Lock()
 	old := statusV2
 	statusV2 = StatusRespV2{Sections: []Section{{Name: "GPT"}, {Name: "Claude"}, {Name: "Grok"}}}
 	mu.Unlock()
-	reorderSections([]string{"Grok", "GPT", "Claude"})
+	reorderSections("", []string{"Grok", "GPT", "Claude"})
 	mu.Lock()
 	names := []string{statusV2.Sections[0].Name, statusV2.Sections[1].Name, statusV2.Sections[2].Name}
 	statusV2 = old
@@ -507,14 +523,14 @@ func TestReorderSubGroups(t *testing.T) {
 		{Name: "B"},
 		{Name: "C"},
 	}}}}
-	if err := reorderSubGroups(&c, "G", []string{"C", "A", "B"}); err != nil {
+	if err := reorderSubGroups(&c, "", "G", []string{"C", "A", "B"}); err != nil {
 		t.Fatal(err)
 	}
 	got := c.Groups[0].SubGroups
 	if got[0].Name != "C" || got[1].Name != "A" || got[1].Models[0].ID != "a" || got[2].Name != "B" {
 		t.Fatalf("%s %s %s", got[0].Name, got[1].Name, got[2].Name)
 	}
-	if err := reorderSubGroups(&c, "G", []string{"C", "A"}); err == nil {
+	if err := reorderSubGroups(&c, "", "G", []string{"C", "A"}); err == nil {
 		t.Fatal("expected incomplete order")
 	}
 
@@ -526,7 +542,7 @@ func TestReorderSubGroups(t *testing.T) {
 		{Name: "m3", SubName: "A"},
 	}}}}
 	mu.Unlock()
-	reorderSectionRows("G", []string{"B", "A"})
+	reorderSectionRows("", "G", []string{"B", "A"})
 	mu.Lock()
 	rows := append([]GroupResp(nil), statusV2.Sections[0].Rows...)
 	statusV2 = old
@@ -581,15 +597,15 @@ func TestSubGroupRatioRoundTrip(t *testing.T) {
 		{Name: "Plus", Ratio: "1.5", Models: []Model{{ID: "gpt", Provider: "openai-compat", Timeout: 30}}},
 		{Name: "Pro"},
 	}}}
-	if err := saveMonitorGroups(groups); err != nil {
+	if err := saveMonitorSites([]Site{{Name: "默认站点", Groups: groups}}); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := loadMonitorGroups()
+	sites, err := loadMonitorSites()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded[0].SubGroups[0].Ratio != "1.5" || loaded[0].SubGroups[1].Ratio != "" {
-		t.Fatalf("%+v", loaded[0].SubGroups)
+	if len(sites) != 1 || sites[0].Groups[0].SubGroups[0].Ratio != "1.5" || sites[0].Groups[0].SubGroups[1].Ratio != "" {
+		t.Fatalf("%+v", sites)
 	}
 }
 
@@ -599,7 +615,7 @@ func TestCopySubGroup(t *testing.T) {
 		KumaSlug: "claude",
 		Models:   []Model{{ID: "claude-haiku", Provider: "anthropic", BaseURL: "https://www.zzshu.cc/v1", Key: "sk", Timeout: 60}},
 	}}}}}
-	if err := copySubGroup(&c, "Claude", "Claude Max", "Claude Max 副本", "", "1.5"); err != nil {
+	if err := copySubGroup(&c, "", "Claude", "Claude Max", "Claude Max 副本", "", "1.5"); err != nil {
 		t.Fatal(err)
 	}
 	got := c.Groups[0].SubGroups
@@ -610,7 +626,7 @@ func TestCopySubGroup(t *testing.T) {
 	if got[0].Models[0].Key != "sk" {
 		t.Fatal("source key changed")
 	}
-	if err := copySubGroup(&c, "Claude", "Claude Max", "Claude Max 副本", "", ""); err == nil {
+	if err := copySubGroup(&c, "", "Claude", "Claude Max", "Claude Max 副本", "", ""); err == nil {
 		t.Fatal("expected duplicate name")
 	}
 }
@@ -621,7 +637,7 @@ func TestEmptyModelBaseUsesDefault(t *testing.T) {
 		t.Fatalf("clean default %q %v", got, err)
 	}
 	c := Config{DefaultBaseURL: "https://zzshu.cc", Groups: []Group{{Name: "G", SubGroups: []SubGroup{{Name: "S"}}}}}
-	if err := addModel(&c, "G", "S", Model{ID: "gpt", Provider: "openai-compat", Key: "k", Timeout: 30}); err != nil {
+	if err := addModel(&c, "", "G", "S", Model{ID: "gpt", Provider: "openai-compat", Key: "k", Timeout: 30}); err != nil {
 		t.Fatal(err)
 	}
 	if c.Groups[0].SubGroups[0].Models[0].BaseURL != "https://zzshu.cc/v1" {

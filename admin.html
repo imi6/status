@@ -232,12 +232,32 @@ button.drag:active{cursor:grabbing}
     <div id="panelModels" hidden>
     <section class="card">
       <h2>模型</h2>
-      <div class="row-actions"><button type="button" id="addGroupBtn">添加分组</button></div>
+      <p class="hint">先选监控站点，再管理这个站点里的分组和模型。状态页顶部可以切换站点。删除站点会去掉它下面的分组和模型，探测历史仍留在数据库里。</p>
+      <div class="row-actions">
+        <button type="button" id="addSiteBtn">添加站点</button>
+        <button type="button" class="ghost" id="editSiteBtn">重命名</button>
+        <button type="button" class="warn" id="delSiteBtn">删除站点</button>
+        <button type="button" id="addGroupBtn">添加分组</button>
+      </div>
+      <div class="group-tabs" id="siteTabs" hidden></div>
       <div class="group-tabs" id="groupTabs" hidden></div>
       <div id="groups"></div>
     </section>
     </div>
   </div>
+</div>
+
+<div class="modal" id="siteModal" hidden>
+  <form id="siteForm" class="modal-card" autocomplete="off">
+    <h2 id="siteFormTitle">添加站点</h2>
+    <div class="grid">
+      <label class="wide">站点名称<input name="name" required></label>
+    </div>
+    <div class="row-actions">
+      <button type="submit">保存</button>
+      <button type="button" class="ghost" data-close="siteModal">取消</button>
+    </div>
+  </form>
 </div>
 
 <div class="modal" id="groupModal" hidden>
@@ -345,6 +365,7 @@ async function api(path, opt){
   return data;
 }
 function hideForms(){
+  $('siteModal').hidden = true;
   $('groupModal').hidden = true;
   $('subModal').hidden = true;
   $('modelModal').hidden = true;
@@ -400,10 +421,33 @@ function telegramBody(f){
   };
 }
 let _modelGroup = '';
+let _modelSite = '';
+let _siteEditing = null;
+function currentSite(){
+  const sites = state.sites || [];
+  if (!sites.length) return null;
+  if (!sites.some(s => s.name === _modelSite)) _modelSite = sites[0].name;
+  return sites.find(s => s.name === _modelSite) || sites[0];
+}
+function currentGroups(){
+  const site = currentSite();
+  if (site) return site.groups || [];
+  return state.groups || [];
+}
 function render(){
   const root = $('groups');
   const tabs = $('groupTabs');
-  const groups = state.groups || [];
+  const siteTabs = $('siteTabs');
+  const sites = state.sites || [];
+  currentSite();
+  if (sites.length){
+    siteTabs.hidden = false;
+    siteTabs.innerHTML = sites.map(s => '<button type="button" class="tab' + (s.name === _modelSite ? ' active' : '') + '" data-model-site="' + escapeHtml(s.name) + '">' + escapeHtml(s.name) + '</button>').join('');
+  } else {
+    siteTabs.hidden = true;
+    siteTabs.innerHTML = '';
+  }
+  const groups = currentGroups();
   if (!groups.length){
     _modelGroup = '';
     tabs.hidden = true;
@@ -449,7 +493,7 @@ async function loadTgLog(){
     el.textContent = err.message;
   }
 }
-function findGroup(name){ return (state.groups || []).find(g => g.name === name); }
+function findGroup(name){ return currentGroups().find(g => g.name === name); }
 function findSub(group, name){
   const g = findGroup(group);
   return g && (g.subGroups || []).find(sg => sg.name === name);
@@ -539,6 +583,50 @@ $('passwordForm').addEventListener('submit', async (e) => {
     showMsg('密码已更新。', false);
   } catch (err) { showMsg(err.message, true); }
 });
+$('addSiteBtn').addEventListener('click', () => {
+  _siteEditing = {mode:'create'};
+  $('siteFormTitle').textContent = '添加站点';
+  $('siteForm').name.value = '';
+  openModal('siteModal');
+  $('siteForm').name.focus();
+});
+$('editSiteBtn').addEventListener('click', () => {
+  if (!_modelSite) { showMsg('还没有站点', true); return; }
+  _siteEditing = {mode:'edit', original:_modelSite};
+  $('siteFormTitle').textContent = '重命名站点';
+  $('siteForm').name.value = _modelSite;
+  openModal('siteModal');
+  $('siteForm').name.focus();
+});
+$('delSiteBtn').addEventListener('click', () => {
+  if (!_modelSite) return;
+  if (!confirm('删除站点「' + _modelSite + '」？它下面的分组和模型会一起删除，探测历史会保留。')) return;
+  api('/api/admin/sites', {method:'DELETE', body:{name:_modelSite}}).then(() => {
+    _modelSite = '';
+    return reload('站点已删除。');
+  }).catch(err => showMsg(err.message, true));
+});
+$('siteForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const name = e.target.name.value;
+  try {
+    if (_siteEditing && _siteEditing.mode === 'edit') {
+      await api('/api/admin/sites', {method:'PUT', body:{name:_siteEditing.original, newName:name}});
+    } else {
+      await api('/api/admin/sites', {method:'POST', body:{name}});
+    }
+    _modelSite = name.trim();
+    hideForms();
+    await reload('站点已保存。');
+  } catch (err) { showMsg(err.message, true); }
+});
+$('siteTabs').addEventListener('click', (e) => {
+  const tab = e.target.closest('[data-model-site]');
+  if (!tab) return;
+  _modelSite = tab.dataset.modelSite || '';
+  _modelGroup = '';
+  render();
+});
 $('addGroupBtn').addEventListener('click', () => {
   editing = {mode:'create'};
   const f = $('groupForm');
@@ -554,9 +642,9 @@ $('groupForm').addEventListener('submit', async (e) => {
   const manualRefresh = f.manualRefresh.checked;
   try {
     if (editing.mode === 'create') {
-      await api('/api/admin/groups', {method:'POST', body:{name:f.name.value, manualRefresh}});
+      await api('/api/admin/groups', {method:'POST', body:{site:_modelSite, name:f.name.value, manualRefresh}});
     } else {
-      await api('/api/admin/groups', {method:'PUT', body:{name:editing.original, newName:f.name.value, manualRefresh}});
+      await api('/api/admin/groups', {method:'PUT', body:{site:_modelSite, name:editing.original, newName:f.name.value, manualRefresh}});
     }
     _modelGroup = f.name.value.trim();
     hideForms();
@@ -568,11 +656,11 @@ $('subForm').addEventListener('submit', async (e) => {
   const f = e.target;
   try {
     if (editing.mode === 'create') {
-      await api('/api/admin/subgroups', {method:'POST', body:{group:editing.group, name:f.name.value, kumaSlug:f.kumaSlug.value, ratio:f.ratio.value}});
+      await api('/api/admin/subgroups', {method:'POST', body:{site:_modelSite, group:editing.group, name:f.name.value, kumaSlug:f.kumaSlug.value, ratio:f.ratio.value}});
     } else if (editing.mode === 'copy') {
-      await api('/api/admin/subgroups', {method:'POST', body:{group:editing.group, name:editing.original, newName:f.name.value, kumaSlug:f.kumaSlug.value, ratio:f.ratio.value, copy:true}});
+      await api('/api/admin/subgroups', {method:'POST', body:{site:_modelSite, group:editing.group, name:editing.original, newName:f.name.value, kumaSlug:f.kumaSlug.value, ratio:f.ratio.value, copy:true}});
     } else {
-      await api('/api/admin/subgroups', {method:'PUT', body:{group:editing.group, name:editing.original, newName:f.name.value, kumaSlug:f.kumaSlug.value, ratio:f.ratio.value}});
+      await api('/api/admin/subgroups', {method:'PUT', body:{site:_modelSite, group:editing.group, name:editing.original, newName:f.name.value, kumaSlug:f.kumaSlug.value, ratio:f.ratio.value}});
     }
     hideForms();
     await reload('子组已保存，并已安排检测。');
@@ -586,9 +674,9 @@ $('modelForm').addEventListener('submit', async (e) => {
   if (editing.mode === 'create' && !model.key.trim()) { showMsg('密钥不能为空', true); return; }
   try {
     if (editing.mode === 'create') {
-      await api('/api/admin/models', {method:'POST', body:{group:editing.group, subgroup:editing.sub, model}});
+      await api('/api/admin/models', {method:'POST', body:{site:_modelSite, group:editing.group, subgroup:editing.sub, model}});
     } else {
-      await api('/api/admin/models', {method:'PUT', body:{group:editing.group, subgroup:editing.sub, index:editing.index, model}});
+      await api('/api/admin/models', {method:'PUT', body:{site:_modelSite, group:editing.group, subgroup:editing.sub, index:editing.index, model}});
     }
     hideForms();
     await reload('模型已保存，并已安排检测。');
@@ -613,6 +701,7 @@ async function loadModelOptions(preferred){
       provider: f.provider.value,
       baseURL: f.baseURL.value,
       key: f.key.value,
+      site: _modelSite,
       group: editing && editing.group || '',
       subgroup: editing && editing.sub || '',
       index: editing && editing.mode === 'edit' ? editing.index : -1
@@ -689,7 +778,7 @@ async function finishSubgroupDrag(e){
   const names = subgroupOrder();
   if (names.join('\n') === drag.start) return;
   try {
-    await api('/api/admin/subgroups', {method:'PATCH', body:{group:drag.group, order:names}});
+    await api('/api/admin/subgroups', {method:'PATCH', body:{site:_modelSite, group:drag.group, order:names}});
     const g = findGroup(drag.group);
     if (g) {
       const by = new Map((g.subGroups || []).map(sg => [sg.name, sg]));
@@ -742,14 +831,16 @@ async function finishGroupDrag(e){
   _suppressTabClick = true;
   const names = groupTabOrder();
   if (names.join('\n') === drag.start) return;
-  const previous = state.groups || [];
+  const previous = currentGroups().slice();
   const by = new Map(previous.map(g => [g.name, g]));
-  state.groups = names.map(name => by.get(name)).filter(Boolean);
+  const next = names.map(name => by.get(name)).filter(Boolean);
+  const site = currentSite();
+  if (site) site.groups = next;
   try {
-    await api('/api/admin/groups', {method:'PATCH', body:{order:names}});
+    await api('/api/admin/groups', {method:'PATCH', body:{site:_modelSite, order:names}});
     showMsg('分组顺序已保存。', false);
   } catch (err) {
-    state.groups = previous;
+    if (site) site.groups = previous;
     showMsg(err.message, true);
     render();
   }
@@ -790,7 +881,7 @@ $('groups').addEventListener('click', (e) => {
     f.name.focus();
   } else if (act === 'del-group') {
     if (!confirm('删除分组「' + group + '」及其全部子组和模型？')) return;
-    api('/api/admin/groups', {method:'DELETE', body:{name:group}}).then(() => reload('分组已删除。')).catch(err => showMsg(err.message, true));
+    api('/api/admin/groups', {method:'DELETE', body:{site:_modelSite, name:group}}).then(() => reload('分组已删除。')).catch(err => showMsg(err.message, true));
   } else if (act === 'add-sub') {
     editing = {mode:'create', group};
     const f = $('subForm');
@@ -828,7 +919,7 @@ $('groups').addEventListener('click', (e) => {
     f.name.select();
   } else if (act === 'del-sub') {
     if (!confirm('删除子组「' + sub + '」及其模型？')) return;
-    api('/api/admin/subgroups', {method:'DELETE', body:{group, name:sub}}).then(() => reload('子组已删除。')).catch(err => showMsg(err.message, true));
+    api('/api/admin/subgroups', {method:'DELETE', body:{site:_modelSite, group, name:sub}}).then(() => reload('子组已删除。')).catch(err => showMsg(err.message, true));
   } else if (act === 'add-model') {
     editing = {mode:'create', group, sub};
     const f = $('modelForm');
@@ -862,7 +953,7 @@ $('groups').addEventListener('click', (e) => {
     loadModelOptions(m.id || '');
   } else if (act === 'del-model') {
     if (!confirm('删除这个模型？')) return;
-    api('/api/admin/models', {method:'DELETE', body:{group, subgroup:sub, index:Number(btn.dataset.index)}}).then(() => reload('模型已删除。')).catch(err => showMsg(err.message, true));
+    api('/api/admin/models', {method:'DELETE', body:{site:_modelSite, group, subgroup:sub, index:Number(btn.dataset.index)}}).then(() => reload('模型已删除。')).catch(err => showMsg(err.message, true));
   }
 });
 
