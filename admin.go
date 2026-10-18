@@ -1288,6 +1288,16 @@ func apiAdmin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		adminClearHistory(w, r)
+	case "community":
+		if !requireAdmin(w, r) {
+			return
+		}
+		adminCommunity(w, r)
+	case "community-codes":
+		if !requireAdmin(w, r) {
+			return
+		}
+		adminCommunityCodes(w, r)
 	default:
 		writeAdminJSON(w, 404, map[string]string{"error": "not found"})
 	}

@@ -163,6 +163,7 @@ button.drag:active{cursor:grabbing}
     <div class="tabs" id="adminTabs">
       <button type="button" class="tab active" data-tab="settings">系统设置</button>
       <button type="button" class="tab" data-tab="models">模型</button>
+      <button type="button" class="tab" data-tab="community">群活动</button>
     </div>
 
     <div id="panelSettings">
@@ -242,6 +243,41 @@ button.drag:active{cursor:grabbing}
       <div class="group-tabs" id="siteTabs" hidden></div>
       <div class="group-tabs" id="groupTabs" hidden></div>
       <div id="groups"></div>
+    </section>
+    </div>
+
+    <div id="panelCommunity" hidden>
+    <section class="card">
+      <h2>群活动</h2>
+      <p class="hint">用户发送 /join 后会计入报名人数，并告诉他当前报了多少人。当天结束时如果人数没达到最少参与人数，这批报名会作废，需要重新报名。达标后，发言条数够的人会在次日收到私信 CDK。</p>
+      <form id="communityForm">
+        <div class="grid">
+          <label class="check"><input name="enabled" type="checkbox">开启群活动</label>
+          <label>活动群 ID<input name="chatID" spellcheck="false" placeholder="留空则用第一个推送群"></label>
+          <label>每日发言条数<input name="speechNeed" type="number" min="1" max="1000" value="10"></label>
+          <label>发言奖励（元）<input name="speechYuan" inputmode="decimal" value="1" placeholder="1"></label>
+          <label>最少参与人数<input name="minSpeakers" type="number" min="1" max="100000" value="100"></label>
+          <label>多少积分<input name="ratePoints" type="number" min="1" max="10000" value="10"></label>
+          <label>等于多少元额度<input name="rateYuan" inputmode="decimal" value="1" placeholder="1"></label>
+          <label>最低兑换积分<input name="minPoints" type="number" min="1" max="10000" value="10"></label>
+        </div>
+        <div class="row-actions"><button type="submit">保存活动设置</button></div>
+      </form>
+    </section>
+    <section class="card">
+      <h2>导入 CDK</h2>
+      <form id="cdkForm">
+        <div class="grid">
+          <label>额度（元）<input name="amount" inputmode="decimal" required value="1" placeholder="1"></label>
+          <label class="wide">兑换码<textarea name="codes" required placeholder="每行一个"></textarea></label>
+        </div>
+        <p class="hint" id="cdkStock">库存读取中…</p>
+        <div class="row-actions"><button type="submit">导入</button></div>
+      </form>
+    </section>
+    <section class="card">
+      <h2>最近积分</h2>
+      <pre id="communityLog" class="logbox">正在读取…</pre>
     </section>
     </div>
   </div>
@@ -872,6 +908,8 @@ $('adminTabs').addEventListener('click', (e) => {
   $('adminTabs').querySelectorAll('.tab').forEach(btn => btn.classList.toggle('active', btn === tab));
   $('panelSettings').hidden = name !== 'settings';
   $('panelModels').hidden = name !== 'models';
+  $('panelCommunity').hidden = name !== 'community';
+  if (name === 'community') loadCommunity();
 });
 $('groups').addEventListener('click', (e) => {
   const btn = e.target.closest('button');
@@ -966,6 +1004,57 @@ $('groups').addEventListener('click', (e) => {
     if (!confirm('删除这个模型？')) return;
     api('/api/admin/models', {method:'DELETE', body:{site:_modelSite, group, subgroup:sub, index:Number(btn.dataset.index)}}).then(() => reload('模型已删除。')).catch(err => showMsg(err.message, true));
   }
+});
+
+async function loadCommunity(){
+  try {
+    const data = await api('/api/admin/community');
+    const f = $('communityForm');
+    const cfg = data.config || {};
+    f.enabled.checked = !!cfg.enabled;
+    f.chatID.value = cfg.chatID || '';
+    f.speechNeed.value = cfg.speechNeed || 10;
+    f.speechYuan.value = cfg.speechYuan || '1';
+    f.minSpeakers.value = cfg.minSpeakers || 100;
+    f.ratePoints.value = cfg.ratePoints || 10;
+    f.rateYuan.value = cfg.rateYuan || '1';
+    f.minPoints.value = cfg.minPoints || 10;
+    const stock = data.stock || [];
+    const speech = data.speech || {};
+    $('cdkStock').textContent = (stock.length ? ('库存 ' + stock.map(item => item.yuan + '元 × ' + item.count + '（' + item.points + '积分）').join(' · ')) : '暂无 CDK。') + ' 今日报名 ' + (speech.members || 0) + '，已发言 ' + (speech.speakers || 0) + '，满条数 ' + (speech.qualified || 0) + '。';
+    const logs = data.logs || [];
+    $('communityLog').textContent = logs.length ? logs.map(item => item.time + '  ' + item.text).join('\n') : '还没有积分记录。';
+  } catch (err) {
+    $('communityLog').textContent = err.message;
+  }
+}
+$('communityForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  try {
+    await api('/api/admin/community', {method:'PUT', body:{
+      enabled: f.enabled.checked,
+      chatID: f.chatID.value,
+      speechNeed: Number(f.speechNeed.value || 10),
+      speechYuan: String(f.speechYuan.value || '1').trim(),
+      minSpeakers: Number(f.minSpeakers.value || 100),
+      ratePoints: Number(f.ratePoints.value || 10),
+      rateYuan: String(f.rateYuan.value || '1').trim(),
+      minPoints: Number(f.minPoints.value || 10)
+    }});
+    showMsg('活动设置已保存。', false);
+    loadCommunity();
+  } catch (err) { showMsg(err.message, true); }
+});
+$('cdkForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  try {
+    const data = await api('/api/admin/community-codes', {method:'POST', body:{amount:f.amount.value, codes:f.codes.value}});
+    f.codes.value = '';
+    showMsg('已导入 ' + (data.added || 0) + ' 个兑换码。', false);
+    loadCommunity();
+  } catch (err) { showMsg(err.message, true); }
 });
 
 async function boot(){

@@ -380,7 +380,10 @@ func ensureSchema() error {
 	if err := ensureSubgroupRatio(); err != nil {
 		return err
 	}
-	return ensureSiteInterval()
+	if err := ensureSiteInterval(); err != nil {
+		return err
+	}
+	return ensureCommunityTables()
 }
 
 func ensureSiteInterval() error {
@@ -3359,6 +3362,7 @@ func main() {
 	initDB()
 	migrateGroups()
 	hydrateStatus()
+	startCommunity()
 
 	go func() {
 		refresh(nil)
