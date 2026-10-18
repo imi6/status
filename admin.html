@@ -297,9 +297,11 @@ button.drag:active{cursor:grabbing}
     <div class="grid">
       <label>协议
         <select name="provider">
-          <option value="openai-compat">OpenAI 兼容</option>
+              <option value="openai-compat">OpenAI 兼容</option>
+              <option value="openai-image">OpenAI 生图</option>
           <option value="openai-response">OpenAI Responses</option>
-          <option value="google">Google Gemini</option>
+              <option value="google">Google Gemini</option>
+              <option value="google-image">Gemini 生图</option>
           <option value="anthropic">Anthropic</option>
         </select>
       </label>
@@ -320,7 +322,7 @@ button.drag:active{cursor:grabbing}
         </span>
       </label>
     </div>
-    <p class="hint">地址留空时使用站点设置里的默认接口地址。网站根地址和带 /v1 的地址都可以，NewAPI、OpenAI 兼容会自动补上 /v1。每次探测向所选模型发送 hi，等它返回文字后才算可用。</p>
+    <p class="hint">地址留空时使用站点设置里的默认接口地址。网站根地址和带 /v1 的地址都可以，NewAPI、OpenAI 兼容会自动补上 /v1。对话协议每次发送 hi，读到文字才算可用。OpenAI 生图走 /images/generations，Grok 生图也用这个协议。Gemini 生图走 /v1beta 的 generateContent，要求返回图片。生图超时建议设为 120 秒。</p>
     <p class="hint" id="keyHint" hidden>编辑时密钥留空会继续用原来的密钥获取模型。</p>
     <div class="row-actions">
       <button type="submit">保存</button>
@@ -343,7 +345,7 @@ function showMsg(text, err){
   el.className = err ? 'msg err' : 'msg';
 }
 function providerLabel(p){
-  return { 'openai-compat':'OpenAI 兼容', 'openai-response':'OpenAI Responses', google:'Google Gemini', anthropic:'Anthropic' }[p] || p || 'OpenAI 兼容';
+  return { 'openai-compat':'OpenAI 兼容', 'openai-image':'OpenAI 生图', 'openai-response':'OpenAI Responses', google:'Google Gemini', 'google-image':'Gemini 生图', anthropic:'Anthropic' }[p] || p || 'OpenAI 兼容';
 }
 function maskKey(k){
   if (!k) return '未设置密钥';
@@ -726,7 +728,10 @@ async function loadModelOptions(preferred){
   }
 }
 $('loadModels').addEventListener('click', () => { loadModelOptions(''); });
-$('toggleKey').addEventListener('click', () => {
+$('modelForm').provider.addEventListener('change', () => {
+  const f = $('modelForm');
+  if ((f.provider.value === 'openai-image' || f.provider.value === 'google-image') && Number(f.timeout.value) === 30) f.timeout.value = 120;
+});
   const input = $('modelForm').key;
   const show = input.type === 'password';
   input.type = show ? 'text' : 'password';

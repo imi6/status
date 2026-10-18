@@ -71,6 +71,12 @@ body{min-height:100vh;background:var(--bg)}
 .metric .label{color:var(--faint);font-size:12px;font-weight:600;letter-spacing:.4px}
 .metric .value{font-size:24px;font-weight:680;margin-top:6px;font-variant-numeric:tabular-nums}
 
+.site-switch{
+  margin-top:16px;display:flex;align-items:center;gap:12px;
+}
+.site-switch[hidden]{display:none}
+.switch-label{flex:none;font-size:13px;font-weight:680;color:var(--dim);letter-spacing:.4px}
+.site-switch .group-switch{flex:1;margin-top:0}
 .group-switch{
   margin-top:16px;padding:8px;border:1px solid var(--border);border-radius:var(--radius);
   background:var(--panel);box-shadow:var(--shadow);
@@ -210,7 +216,10 @@ body{min-height:100vh;background:var(--bg)}
     </div>
   </section>
 
-  <section class="group-switch" id="siteSwitch" hidden></section>
+  <section class="site-switch" id="siteSwitch" hidden>
+    <span class="switch-label">站点</span>
+    <div class="group-switch" id="siteSwitchRow"></div>
+  </section>
   <section class="group-switch" id="groupSwitch" hidden></section>
   <section class="groups" id="app"><div class="empty">正在读取状态...</div></section>
   <div class="footer" id="pageFooter"></div>
@@ -331,19 +340,25 @@ function rememberSite(name){
   const saved=localStorage.getItem('statusGroup:'+_site);
   if(saved!==null)_group=saved;
 }
+function siteList(data){
+  const listed=Array.isArray(data&&data.sites)?data.sites.filter(s=>s&&s.name):[];
+  if(listed.length)return listed;
+  return [];
+}
 function renderSiteSwitch(sites){
-  const el=document.getElementById('siteSwitch');
+  const wrap=document.getElementById('siteSwitch');
+  const el=document.getElementById('siteSwitchRow');
   const names=(sites||[]).map(s=>s.name).filter(Boolean);
-  if(names.length<2){el.hidden=true;el.innerHTML='';return;}
+  if(!names.length){wrap.hidden=true;el.innerHTML='';return;}
   if(!_site||names.indexOf(_site)<0)_site=names[0];
-  el.hidden=false;
+  wrap.hidden=false;
   el.innerHTML=names.map(name=>{
     const active=name===_site?' active':'';
     return '<button type="button" class="switch-btn'+active+'" data-site="'+escapeHtml(name)+'">'+escapeHtml(name)+'</button>';
   }).join('');
 }
 function currentSiteBlock(data){
-  const sites=Array.isArray(data&&data.sites)?data.sites:[];
+  const sites=siteList(data);
   if(sites.length){
     if(!_site||!sites.some(s=>s.name===_site))_site=sites[0].name||'';
     return sites.find(s=>s.name===_site)||sites[0];
@@ -445,7 +460,7 @@ function render(data){
   const siteBlock=currentSiteBlock(data);
   rememberSite(siteBlock.name||'');
   const sections=siteBlock.sections||[];
-  renderSiteSwitch(data.sites);
+  renderSiteSwitch(siteList(data));
   renderGroupSwitch(sections);
   const shown=visibleSections(sections);
   const overall=siteOverall(shown.length?shown:sections);

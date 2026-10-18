@@ -493,7 +493,7 @@ func cleanModel(m *Model, prevKey string, creating bool, defaultBase string) err
 		return errors.New("模型 ID 不能包含引号、竖线或换行")
 	}
 	switch m.Provider {
-	case "", "openai-compat", "openai-response", "google", "anthropic":
+	case "", "openai-compat", "openai-response", "openai-image", "google", "google-image", "anthropic":
 		if m.Provider == "" {
 			m.Provider = "openai-compat"
 		}
@@ -1724,7 +1724,7 @@ func listUpstreamModels(provider, baseURL, key string) ([]string, error) {
 		provider = "openai-compat"
 	}
 	switch provider {
-	case "openai-compat", "openai-response", "google", "anthropic":
+	case "openai-compat", "openai-response", "openai-image", "google", "google-image", "anthropic":
 	default:
 		return nil, errors.New("不支持的协议")
 	}
@@ -1757,10 +1757,12 @@ func listUpstreamModels(provider, baseURL, key string) ([]string, error) {
 			return nil, errors.New("地址无效")
 		}
 		switch provider {
-		case "google":
+		case "google", "google-image":
 			q := req.URL.Query()
 			q.Set("key", key)
 			req.URL.RawQuery = q.Encode()
+			req.Header.Set("authorization", "Bearer "+key)
+			req.Header.Set("x-goog-api-key", key)
 		case "anthropic":
 			req.Header.Set("x-api-key", key)
 			req.Header.Set("anthropic-version", "2023-06-01")
@@ -1831,14 +1833,14 @@ func normalizeBaseURL(provider, raw string) (string, error) {
 	}
 	path := stripAPISuffix(strings.TrimRight(u.Path, "/"))
 	switch provider {
-	case "openai-compat", "openai-response", "anthropic":
+	case "openai-compat", "openai-response", "openai-image", "anthropic":
 		for strings.HasSuffix(path, "/v1/v1") {
 			path = strings.TrimSuffix(path, "/v1")
 		}
 		if !strings.HasSuffix(path, "/v1") {
 			path += "/v1"
 		}
-	case "google":
+	case "google", "google-image":
 		if path == "" {
 			path = "/v1beta"
 		}
@@ -1877,7 +1879,7 @@ func cleanDefaultBase(raw string) (string, error) {
 }
 
 func stripAPISuffix(path string) string {
-	suffixes := []string{"/chat/completions", "/completions", "/responses", "/messages", "/models"}
+	suffixes := []string{"/chat/completions", "/completions", "/responses", "/images/generations", "/messages", "/models"}
 	for {
 		changed := false
 		for _, suffix := range suffixes {

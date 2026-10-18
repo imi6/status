@@ -261,9 +261,10 @@ func TestNormalizeBaseURL(t *testing.T) {
 		{"openai-compat", "https://api.example.com/v1/models", "https://api.example.com/v1"},
 		{"openai-compat", "https://api.example.com/v1/chat/completions", "https://api.example.com/v1"},
 		{"openai-compat", "https://api.example.com/api", "https://api.example.com/api/v1"},
-		{"anthropic", "https://api.anthropic.com", "https://api.anthropic.com/v1"},
+		{"openai-image", "https://api.example.com/v1/images/generations", "https://api.example.com/v1"},
 		{"google", "https://generativelanguage.googleapis.com", "https://generativelanguage.googleapis.com/v1beta"},
 		{"google", "https://generativelanguage.googleapis.com/v1beta", "https://generativelanguage.googleapis.com/v1beta"},
+		{"google-image", "https://zzshu.cc", "https://zzshu.cc/v1beta"},
 	}
 	for _, tc := range cases {
 		got, err := normalizeBaseURL(tc.provider, tc.in)

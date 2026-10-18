@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -94,6 +95,24 @@ func TestReplyParsersRequireModelText(t *testing.T) {
 	if anthropicHasReply([]byte(`{"ok":true}`)) {
 		t.Fatal("unrelated json")
 	}
+	if !imageHasResult([]byte(`{"data":[{"url":"https://cdn.example/a.png"}]}`)) {
+		t.Fatal("image url")
+	}
+	if !imageHasResult([]byte(`{"data":[{"b64_json":"abc"}]}`)) {
+		t.Fatal("image b64")
+	}
+	if imageHasResult([]byte(`{"data":[{"url":""}]}`)) || imageHasResult([]byte(`{"ok":true}`)) {
+		t.Fatal("empty image")
+	}
+	if imageHasResult([]byte(`{"error":{"message":"billing"},"data":[{"url":"https://cdn.example/a.png"}]}`)) {
+		t.Fatal("image error")
+	}
+	if !googleHasImage([]byte(`{"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":"abc"}}]}}]}`)) {
+		t.Fatal("gemini inline image")
+	}
+	if googleHasImage([]byte(`{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}`)) {
+		t.Fatal("gemini text is not an image")
+	}
 }
 
 func TestCheckOpenAICompatRequiresModelText(t *testing.T) {
@@ -127,6 +146,83 @@ func TestCheckOpenAICompatRequiresModelText(t *testing.T) {
 	up, _ = checkOpenAICompat(Model{ID: "GPT-PRO", BaseURL: srv.URL + "/empty", Key: "sk", Timeout: 5, Provider: "openai-compat"})
 	if up {
 		t.Fatal("HTTP 200 without model text should be down")
+	}
+}
+
+func TestCheckOpenAIImageRequiresImage(t *testing.T) {
+	var gotPath, gotModel, gotPrompt, gotSize string
+	var gotN int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		if r.URL.Path != "/v1/images/generations" || r.Header.Get("Authorization") != "Bearer sk" {
+			w.WriteHeader(http.StatusOK)
+			io.WriteString(w, `{"ok":true}`)
+			return
+		}
+		var body struct {
+			Model  string `json:"model"`
+			Prompt string `json:"prompt"`
+			N      int    `json:"n"`
+			Size   string `json:"size"`
+		}
+		raw, _ := io.ReadAll(r.Body)
+		if json.Unmarshal(raw, &body) != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		gotPath, gotModel, gotPrompt, gotN, gotSize = r.URL.Path, body.Model, body.Prompt, body.N, body.Size
+		io.WriteString(w, `{"data":[{"url":"https://cdn.example/red.png"}]}`)
+	}))
+	defer srv.Close()
+
+	up, _ := checkOpenAIImage(Model{ID: "flux", BaseURL: srv.URL, Key: "sk", Timeout: 5, Provider: "openai-image"})
+	if !up || gotPath != "/v1/images/generations" || gotModel != "flux" || gotPrompt != "red square" || gotN != 1 || gotSize != "1024x1024" {
+		t.Fatalf("up %v path %s model %s prompt %s n %d size %s", up, gotPath, gotModel, gotPrompt, gotN, gotSize)
+	}
+	up, _ = checkOne(Model{ID: "flux", BaseURL: srv.URL + "/empty", Key: "sk", Timeout: 5, Provider: "openai-image"})
+	if up {
+		t.Fatal("HTTP 200 without image should be down")
+	}
+}
+
+func TestCheckGoogleImageRequiresInlineImage(t *testing.T) {
+	var gotPath, gotPrompt, gotModalities, gotRatio string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		if !strings.HasSuffix(r.URL.Path, "/models/gemini-2.5-flash-image:generateContent") || r.Header.Get("Authorization") != "Bearer sk" || r.Header.Get("x-goog-api-key") != "sk" {
+			w.WriteHeader(http.StatusOK)
+			io.WriteString(w, `{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}`)
+			return
+		}
+		var body struct {
+			Contents []struct {
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"contents"`
+			GenerationConfig struct {
+				ResponseModalities []string `json:"responseModalities"`
+				ImageConfig        struct {
+					AspectRatio string `json:"aspectRatio"`
+				} `json:"imageConfig"`
+			} `json:"generationConfig"`
+		}
+		raw, _ := io.ReadAll(r.Body)
+		if json.Unmarshal(raw, &body) != nil || len(body.Contents) != 1 || len(body.Contents[0].Parts) != 1 {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		gotPath = r.URL.Path
+		gotPrompt = body.Contents[0].Parts[0].Text
+		gotModalities = strings.Join(body.GenerationConfig.ResponseModalities, ",")
+		gotRatio = body.GenerationConfig.ImageConfig.AspectRatio
+		io.WriteString(w, `{"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":"abc"}}]}}]}`)
+	}))
+	defer srv.Close()
+
+	up, _ := checkGoogleImage(Model{ID: "gemini-2.5-flash-image", BaseURL: srv.URL, Key: "sk", Timeout: 5, Provider: "google-image"})
+	if !up || !strings.HasSuffix(gotPath, "/v1beta/models/gemini-2.5-flash-image:generateContent") || gotPrompt != "red square" || gotModalities != "TEXT,IMAGE" || gotRatio != "1:1" {
+		t.Fatalf("up %v path %s prompt %s modalities %s ratio %s", up, gotPath, gotPrompt, gotModalities, gotRatio)
 	}
 }
 

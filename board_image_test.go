@@ -17,6 +17,18 @@ import (
 	"golang.org/x/image/font/opentype"
 )
 
+func TestPackSitesIgnoresRetiredName(t *testing.T) {
+	sites := []Site{{Name: "甲"}, {Name: "乙"}}
+	sections := []Section{
+		{Site: "甲", Name: "GPT"},
+		{Site: "吱吱鼠AI监控", Name: "GPT"},
+	}
+	got := packSites(knownSections(sections, sites), sites)
+	if len(got) != 2 || got[0].Name != "甲" || got[1].Name != "乙" || len(got[0].Sections) != 1 || len(got[1].Sections) != 0 {
+		t.Fatalf("%+v", got)
+	}
+}
+
 func TestBoardColumns(t *testing.T) {
 	if boardColumns(8) != 2 {
 		t.Fatalf("8 cards -> %d", boardColumns(8))

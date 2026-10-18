@@ -1108,6 +1108,43 @@ func checkOpenAICompat(m Model) (bool, int) {
 	return code > 0 && code < 300 && openaiCompatHasReply(resp), lat
 }
 
+func checkOpenAIImage(m Model) (bool, int) {
+	base, ok := readyBase(m)
+	if !ok {
+		return false, 0
+	}
+	body, err := json.Marshal(map[string]any{
+		"model":  m.ID,
+		"prompt": "red square",
+		"n":      1,
+		"size":   "1024x1024",
+	})
+	if err != nil {
+		return false, 0
+	}
+	code, resp, lat := doPost(base+"/images/generations", m.Key, body, m.Timeout)
+	return code > 0 && code < 300 && imageHasResult(resp), lat
+}
+
+func imageHasResult(raw []byte) bool {
+	var v struct {
+		Error json.RawMessage `json:"error"`
+		Data  []struct {
+			URL string `json:"url"`
+			B64 string `json:"b64_json"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(raw, &v) != nil || hasAPIError(v.Error) {
+		return false
+	}
+	for _, item := range v.Data {
+		if strings.TrimSpace(item.URL) != "" || strings.TrimSpace(item.B64) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func checkOpenAIResponse(m Model) (bool, int) {
 	base, ok := readyBase(m)
 	if !ok {
@@ -1133,6 +1170,42 @@ func checkGoogle(m Model) (bool, int) {
 	}
 	code, resp, lat := doPost(url, "", body, m.Timeout)
 	return code > 0 && code < 300 && googleHasReply(resp), lat
+}
+
+func checkGoogleImage(m Model) (bool, int) {
+	base, ok := readyBase(m)
+	if !ok {
+		return false, 0
+	}
+	body, err := json.Marshal(map[string]any{
+		"contents": []map[string]any{{
+			"role": "user",
+			"parts": []map[string]any{{
+				"text": "red square",
+			}},
+		}},
+		"generationConfig": map[string]any{
+			"responseModalities": []string{"TEXT", "IMAGE"},
+			"imageConfig": map[string]any{
+				"aspectRatio": "1:1",
+			},
+		},
+	})
+	if err != nil {
+		return false, 0
+	}
+	endpoint := fmt.Sprintf("%s/models/%s:generateContent", base, m.ID)
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return false, 0
+	}
+	req.Header.Set("content-type", "application/json")
+	if m.Key != "" {
+		req.Header.Set("authorization", "Bearer "+m.Key)
+		req.Header.Set("x-goog-api-key", m.Key)
+	}
+	code, resp, lat := doReq(req, m.Timeout)
+	return code > 0 && code < 300 && googleHasImage(resp), lat
 }
 
 func readyBase(m Model) (string, bool) {
@@ -1320,14 +1393,66 @@ func anthropicHasReply(raw []byte) bool {
 	return false
 }
 
+func googleHasImage(raw []byte) bool {
+	var v struct {
+		Error    json.RawMessage `json:"error"`
+		Response json.RawMessage `json:"response"`
+	}
+	if json.Unmarshal(raw, &v) != nil || hasAPIError(v.Error) {
+		return false
+	}
+	if geminiRawHasImage(raw) {
+		return true
+	}
+	return len(v.Response) > 0 && geminiRawHasImage(v.Response)
+}
+
+func geminiRawHasImage(raw []byte) bool {
+	var v struct {
+		Candidates []struct {
+			Content struct {
+				Parts []struct {
+					InlineData struct {
+						MimeType string `json:"mimeType"`
+						Data     string `json:"data"`
+					} `json:"inlineData"`
+					InlineDataSnake struct {
+						MimeType string `json:"mime_type"`
+						Data     string `json:"data"`
+					} `json:"inline_data"`
+				} `json:"parts"`
+			} `json:"content"`
+		} `json:"candidates"`
+	}
+	if json.Unmarshal(raw, &v) != nil {
+		return false
+	}
+	for _, c := range v.Candidates {
+		for _, p := range c.Content.Parts {
+			if geminiInlineImage(p.InlineData.MimeType, p.InlineData.Data) || geminiInlineImage(p.InlineDataSnake.MimeType, p.InlineDataSnake.Data) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func geminiInlineImage(mime, data string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(mime)), "image/") && strings.TrimSpace(data) != ""
+}
+
 func checkOne(m Model) (bool, int) {
 	switch m.Provider {
 	case "openai-compat":
 		return checkOpenAICompat(m)
+	case "openai-image":
+		return checkOpenAIImage(m)
 	case "openai-response":
 		return checkOpenAIResponse(m)
 	case "google":
 		return checkGoogle(m)
+	case "google-image":
+		return checkGoogleImage(m)
 	case "anthropic":
 		return checkAnthropic(m)
 	default:
@@ -1337,11 +1462,11 @@ func checkOne(m Model) (bool, int) {
 
 func providerFamily(p string) string {
 	switch p {
-	case "openai-compat", "openai-response":
+	case "openai-compat", "openai-response", "openai-image":
 		return "openai"
 	case "anthropic":
 		return "claude"
-	case "google":
+	case "google", "google-image":
 		return "gemini"
 	default:
 		return "other"
@@ -1420,6 +1545,7 @@ func updateRow(site, gName string, sg SubGroup, m Model, sections *[]Section, up
 
 	overallStatus, overallLabel := overallFromRows(*sections)
 
+	*sections = knownSections(*sections, configSites(cfg))
 	statusV2 = StatusRespV2{
 		Title:    cfg.Frontend.Title,
 		Overall:  OverallStatus{Status: overallStatus, Label: overallLabel},
@@ -1432,31 +1558,33 @@ func updateRow(site, gName string, sg SubGroup, m Model, sections *[]Section, up
 
 func packSites(sections []Section, sites []Site) []SiteStatus {
 	grouped := map[string][]Section{}
-	var extra []string
 	for _, sec := range sections {
-		if _, ok := grouped[sec.Site]; !ok {
-			extra = append(extra, sec.Site)
-		}
 		grouped[sec.Site] = append(grouped[sec.Site], sec)
 	}
-	var out []SiteStatus
-	seen := map[string]bool{}
+	out := make([]SiteStatus, 0, len(sites))
 	for _, site := range sites {
-		seen[site.Name] = true
 		secs := grouped[site.Name]
 		if secs == nil {
 			secs = []Section{}
 		}
 		out = append(out, SiteStatus{Name: site.Name, Sections: secs})
 	}
-	for _, name := range extra {
-		if seen[name] {
-			continue
-		}
-		out = append(out, SiteStatus{Name: name, Sections: grouped[name]})
+	return out
+}
+
+func knownSections(sections []Section, sites []Site) []Section {
+	if len(sites) == 0 {
+		return sections
 	}
-	if out == nil {
-		out = []SiteStatus{}
+	ok := make(map[string]bool, len(sites))
+	for _, site := range sites {
+		ok[site.Name] = true
+	}
+	out := make([]Section, 0, len(sections))
+	for _, sec := range sections {
+		if ok[sec.Site] {
+			out = append(out, sec)
+		}
 	}
 	return out
 }
@@ -1733,6 +1861,7 @@ func refresh() {
 
 	// 根据 config 清理已不存在的条目，并立刻按后台顺序发布
 	sections = pruneStaleSections(sections, cfg)
+	sections = knownSections(sections, configSites(cfg))
 	mu.Lock()
 	ensureFreshHistory(sections)
 	sections = applyConfigOrder(sections, configSites(cfg))
@@ -1789,6 +1918,7 @@ func refresh() {
 	// 全部检测完毕，标记 checking = false
 	mu.Lock()
 	ensureFreshHistory(sections)
+	sections = knownSections(sections, configSites(cfg))
 	sections = applyConfigOrder(sections, configSites(cfg))
 	applyLiveRatios(sections)
 	overallStatus, overallLabel := overallFromRows(sections)
@@ -2687,9 +2817,9 @@ func writeJSON(w http.ResponseWriter, code int, v interface{}) {
 func apiStatus(w http.ResponseWriter, r *http.Request) {
 	mu.RLock()
 	s := statusV2
-	if s.Sites == nil {
-		s.Sites = packSites(s.Sections, configSites(cfg))
-	}
+	sites := configSites(cfg)
+	s.Sections = knownSections(s.Sections, sites)
+	s.Sites = packSites(s.Sections, sites)
 	c := checking
 	cooldown := cfg.ManualRefreshCooldown
 	if cooldown == 0 {
