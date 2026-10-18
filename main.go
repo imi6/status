@@ -311,14 +311,11 @@ func configSites(c Config) []Site {
 
 func initDB() {
 	var err error
-	db, err = sql.Open("sqlite", "status.db")
+	db, err = sql.Open("sqlite", "status.db?_pragma=busy_timeout(5000)")
 	if err != nil {
 		log.Fatal(err)
 	}
-	db.SetMaxOpenConns(1)
-	if _, err = db.Exec(`PRAGMA busy_timeout = 5000`); err != nil {
-		log.Fatal(err)
-	}
+	db.SetMaxOpenConns(8)
 	if err := ensureSchema(); err != nil {
 		log.Fatal(err)
 	}
@@ -526,24 +523,36 @@ func loadMonitorSites() ([]Site, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var sites []Site
+	type siteRow struct {
+		id, interval int
+		name         string
+	}
+	var list []siteRow
 	for rows.Next() {
-		var id, interval int
-		var name string
-		if err := rows.Scan(&id, &name, &interval); err != nil {
+		var item siteRow
+		if err := rows.Scan(&item.id, &item.name, &item.interval); err != nil {
+			rows.Close()
 			return nil, err
 		}
-		groups, err := loadMonitorGroups(id)
+		list = append(list, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	var sites []Site
+	for _, item := range list {
+		groups, err := loadMonitorGroups(item.id)
 		if err != nil {
 			return nil, err
 		}
-		sites = append(sites, Site{Name: name, Interval: interval, Groups: groups})
+		sites = append(sites, Site{Name: item.name, Interval: item.interval, Groups: groups})
 	}
 	if sites == nil {
 		sites = []Site{}
 	}
-	return sites, rows.Err()
+	return sites, nil
 }
 
 func loadMonitorGroups(siteID int) ([]Group, error) {
@@ -551,24 +560,36 @@ func loadMonitorGroups(siteID int) ([]Group, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var groups []Group
+	type groupRow struct {
+		id, manual int
+		name       string
+	}
+	var list []groupRow
 	for rows.Next() {
-		var id, manual int
-		var name string
-		if err := rows.Scan(&id, &name, &manual); err != nil {
+		var item groupRow
+		if err := rows.Scan(&item.id, &item.name, &item.manual); err != nil {
+			rows.Close()
 			return nil, err
 		}
-		subs, err := loadMonitorSubgroups(id)
+		list = append(list, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	var groups []Group
+	for _, item := range list {
+		subs, err := loadMonitorSubgroups(item.id)
 		if err != nil {
 			return nil, err
 		}
-		groups = append(groups, Group{Name: name, ManualRefresh: manual == 1, SubGroups: subs})
+		groups = append(groups, Group{Name: item.name, ManualRefresh: item.manual == 1, SubGroups: subs})
 	}
 	if groups == nil {
 		groups = []Group{}
 	}
-	return groups, rows.Err()
+	return groups, nil
 }
 
 func loadMonitorSubgroups(groupID int) ([]SubGroup, error) {
@@ -576,24 +597,37 @@ func loadMonitorSubgroups(groupID int) ([]SubGroup, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var subs []SubGroup
+	type subRow struct {
+		id          int
+		name, slug  string
+		ratio       string
+	}
+	var list []subRow
 	for rows.Next() {
-		var id int
-		var name, slug, ratio string
-		if err := rows.Scan(&id, &name, &slug, &ratio); err != nil {
+		var item subRow
+		if err := rows.Scan(&item.id, &item.name, &item.slug, &item.ratio); err != nil {
+			rows.Close()
 			return nil, err
 		}
-		models, err := loadMonitorModels(id)
+		list = append(list, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	var subs []SubGroup
+	for _, item := range list {
+		models, err := loadMonitorModels(item.id)
 		if err != nil {
 			return nil, err
 		}
-		subs = append(subs, SubGroup{Name: name, KumaSlug: slug, Ratio: strings.TrimSpace(ratio), Models: models})
+		subs = append(subs, SubGroup{Name: item.name, KumaSlug: item.slug, Ratio: strings.TrimSpace(item.ratio), Models: models})
 	}
 	if subs == nil {
 		subs = []SubGroup{}
 	}
-	return subs, rows.Err()
+	return subs, nil
 }
 
 func loadMonitorModels(subgroupID int) ([]Model, error) {
