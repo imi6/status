@@ -122,6 +122,8 @@ func TestDailySpeechNeedsJoinedQuorum(t *testing.T) {
 	recordSpeech(ada, day1)
 	ada.Text = "one"
 	recordSpeech(ada, day1)
+	ada.Text = "one"
+	recordSpeech(ada, day1)
 	ada.Text = "two"
 	recordSpeech(ada, day1)
 	if speechCount(7, "2026-10-17") != 2 {

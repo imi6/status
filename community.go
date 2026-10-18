@@ -82,6 +82,12 @@ func ensureCommunityTables() error {
 			rewarded INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (day, user_id)
 		);
+		CREATE TABLE IF NOT EXISTS daily_speech_lines (
+			day TEXT NOT NULL,
+			user_id INTEGER NOT NULL,
+			body TEXT NOT NULL,
+			PRIMARY KEY (day, user_id, body)
+		);
 		CREATE TABLE IF NOT EXISTS daily_settle (
 			day TEXT PRIMARY KEY,
 			participants INTEGER NOT NULL,
@@ -731,9 +737,18 @@ func recordSpeech(msg communityMessage, now time.Time) {
 	if !speechMember(msg.UserID) {
 		return
 	}
+	text = strings.Join(strings.Fields(text), " ")
+	day := speechDay(now)
+	res, err := db.Exec(`INSERT INTO daily_speech_lines (day, user_id, body) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`, day, msg.UserID, text)
+	if err != nil {
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return
+	}
 	_, _ = db.Exec(`INSERT INTO daily_speech (day, user_id, user_name, messages, rewarded) VALUES (?, ?, ?, 1, 0)
 		ON CONFLICT(day, user_id) DO UPDATE SET messages = messages + 1, user_name = excluded.user_name`,
-		speechDay(now), msg.UserID, msg.displayName())
+		day, msg.UserID, msg.displayName())
 }
 
 type speechSnapshot struct {
