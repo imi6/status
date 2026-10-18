@@ -72,8 +72,9 @@ type KumaConfig struct {
 }
 
 type Site struct {
-	Name   string  `json:"name"`
-	Groups []Group `json:"groups"`
+	Name     string  `json:"name"`
+	Interval int     `json:"interval,omitempty"` // 单独检测间隔（秒）。0 表示用全局间隔
+	Groups   []Group `json:"groups"`
 }
 
 type Group struct {
@@ -267,6 +268,26 @@ func normalizeGroupList(groups []Group) {
 	}
 }
 
+func effectiveInterval(site Site, global int) int {
+	if site.Interval >= 5 {
+		return site.Interval
+	}
+	if global < 5 {
+		return 60
+	}
+	return global
+}
+
+func cleanSiteInterval(seconds int) (int, error) {
+	if seconds == 0 {
+		return 0, nil
+	}
+	if seconds < 5 || seconds > 86400 {
+		return 0, errors.New("站点检测间隔需在 5 到 86400 秒，留空则使用全局间隔")
+	}
+	return seconds, nil
+}
+
 func defaultSiteName(title string) string {
 	title = strings.TrimSpace(title)
 	if title == "" || title == "Service Status" {
@@ -294,7 +315,14 @@ func initDB() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	db.SetMaxOpenConns(1)
+	if _, err = db.Exec(`PRAGMA busy_timeout = 5000`); err != nil {
+		log.Fatal(err)
+	}
 	if err := ensureSchema(); err != nil {
+		log.Fatal(err)
+	}
+	if err = ensureSiteInterval(); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -352,7 +380,19 @@ func ensureSchema() error {
 	if err != nil {
 		return err
 	}
-	return ensureSubgroupRatio()
+	if err := ensureSubgroupRatio(); err != nil {
+		return err
+	}
+	return ensureSiteInterval()
+}
+
+func ensureSiteInterval() error {
+	has, err := columnExists("monitor_sites", "interval")
+	if err != nil || has {
+		return err
+	}
+	_, err = db.Exec(`ALTER TABLE monitor_sites ADD COLUMN interval INTEGER NOT NULL DEFAULT 0`)
+	return err
 }
 
 func ensureSubgroupRatio() error {
@@ -482,23 +522,23 @@ func rebuildGroupsWithSite(defaultSite string) error {
 }
 
 func loadMonitorSites() ([]Site, error) {
-	rows, err := db.Query(`SELECT id, name FROM monitor_sites ORDER BY sort_order, id`)
+	rows, err := db.Query(`SELECT id, name, interval FROM monitor_sites ORDER BY sort_order, id`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var sites []Site
 	for rows.Next() {
-		var id int
+		var id, interval int
 		var name string
-		if err := rows.Scan(&id, &name); err != nil {
+		if err := rows.Scan(&id, &name, &interval); err != nil {
 			return nil, err
 		}
 		groups, err := loadMonitorGroups(id)
 		if err != nil {
 			return nil, err
 		}
-		sites = append(sites, Site{Name: name, Groups: groups})
+		sites = append(sites, Site{Name: name, Interval: interval, Groups: groups})
 	}
 	if sites == nil {
 		sites = []Site{}
@@ -598,7 +638,7 @@ func saveMonitorSites(sites []Site) error {
 		return err
 	}
 	for i, site := range sites {
-		res, err := tx.Exec(`INSERT INTO monitor_sites (name, sort_order) VALUES (?, ?)`, site.Name, i)
+		res, err := tx.Exec(`INSERT INTO monitor_sites (name, sort_order, interval) VALUES (?, ?, ?)`, site.Name, i, site.Interval)
 		if err != nil {
 			return err
 		}
@@ -1860,12 +1900,50 @@ func pruneStaleSections(sections []Section, cfg Config) []Section {
 	return result
 }
 
-func refresh() {
+type probeTarget struct {
+	site, gName, sgName, ratio string
+	m                          Model
+}
+
+func runProbes(targets []probeTarget, sections *[]Section, saveFailure bool) (failed []probeTarget, totalLat, latCount int) {
+	if len(targets) == 0 {
+		return nil, 0, 0
+	}
+	var wg sync.WaitGroup
+	var resultMu sync.Mutex
+	wg.Add(len(targets))
+	for _, target := range targets {
+		go func(target probeTarget) {
+			defer wg.Done()
+			up, lat := checkOne(target.m)
+			if up || saveFailure {
+				saveCheck(target.site, target.gName, target.sgName, target.m.ID, up, lat)
+			}
+			if up {
+				resultMu.Lock()
+				totalLat += lat
+				latCount++
+				resultMu.Unlock()
+			} else if !saveFailure {
+				resultMu.Lock()
+				failed = append(failed, target)
+				resultMu.Unlock()
+			}
+			if up || saveFailure {
+				updateRow(target.site, target.gName, SubGroup{Name: target.sgName, Ratio: target.ratio}, target.m, sections, up, lat)
+			}
+		}(target)
+	}
+	wg.Wait()
+	return failed, totalLat, latCount
+}
+
+func refresh(only map[string]bool) bool {
 	// 防止并发执行：如果已有一次检测正在运行，则跳过
 	mu.Lock()
 	if checking {
 		mu.Unlock()
-		return
+		return false
 	}
 	checking = true
 	mu.Unlock()
@@ -1882,7 +1960,7 @@ func refresh() {
 	}
 	mu.RUnlock()
 
-	// 以当前已有状态为起点，逐个检测并实时更新
+	// 以当前已有状态为起点，本轮模型同时探测
 	mu.RLock()
 	sections := statusV2.Sections
 	if sections == nil {
@@ -1902,48 +1980,25 @@ func refresh() {
 	mu.Unlock()
 
 	now := time.Now()
-	totalLat := 0
-	latCount := 0
-
-	// failRecords 记录首次失败的模型，等全部测完再统一重试
-	type failRecord struct {
-		site, gName, sgName, ratio string
-		m                          Model
-		lat                         int
-	}
-	var failRecords []failRecord
-
-	// 逐个检测所有模型，失败的暂不记录，先收集
+	var targets []probeTarget
 	for _, site := range configSites(cfg) {
+		if only != nil && !only[site.Name] {
+			continue
+		}
 		for _, g := range site.Groups {
 			for _, sg := range g.SubGroups {
 				for _, m := range sg.Models {
-					up, lat := checkOne(m)
-					if up {
-						saveCheck(site.Name, g.Name, sg.Name, m.ID, true, lat)
-						totalLat += lat
-						latCount++
-						updateRow(site.Name, g.Name, sg, m, &sections, true, lat)
-					} else {
-						failRecords = append(failRecords, failRecord{site: site.Name, gName: g.Name, sgName: sg.Name, ratio: sg.Ratio, m: m, lat: lat})
-					}
+					targets = append(targets, probeTarget{site.Name, g.Name, sg.Name, sg.Ratio, m})
 				}
 			}
 		}
 	}
-
-	// 等待5秒后重试所有失败的模型
-	if len(failRecords) > 0 {
+	failed, totalLat, latCount := runProbes(targets, &sections, false)
+	if len(failed) > 0 {
 		time.Sleep(5 * time.Second)
-		for _, fr := range failRecords {
-			up, lat := checkOne(fr.m)
-			saveCheck(fr.site, fr.gName, fr.sgName, fr.m.ID, up, lat)
-			if up {
-				totalLat += lat
-				latCount++
-			}
-			updateRow(fr.site, fr.gName, SubGroup{Name: fr.sgName, Ratio: fr.ratio}, fr.m, &sections, up, lat)
-		}
+		_, retryLat, retryCount := runProbes(failed, &sections, true)
+		totalLat += retryLat
+		latCount += retryCount
 	}
 
 	// 全部检测完毕，标记 checking = false
@@ -2061,6 +2116,7 @@ func refresh() {
 	}
 
 	cleanupOld()
+	return true
 }
 
 func statusWord(status string) string {
@@ -2960,7 +3016,7 @@ func apiRefresh(w http.ResponseWriter, r *http.Request) {
 	manualRefreshMu.Unlock()
 
 	// 异步触发刷新
-	go refresh()
+	go refresh(nil)
 
 	mu.RLock()
 	cooldown := cfg.ManualRefreshCooldown
@@ -3209,6 +3265,61 @@ func serveAsset(w http.ResponseWriter, r *http.Request, name string) {
 	http.NotFound(w, r)
 }
 
+func soonestRun(next map[string]time.Time) time.Time {
+	var soon time.Time
+	for _, at := range next {
+		if soon.IsZero() || at.Before(soon) {
+			soon = at
+		}
+	}
+	if soon.IsZero() {
+		return time.Now().Add(time.Second)
+	}
+	return soon
+}
+
+func dueSiteNames(next map[string]time.Time, now time.Time) []string {
+	var names []string
+	for name, at := range next {
+		if !at.After(now) {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+func syncSiteSchedule(next map[string]time.Time, now time.Time, reset bool) {
+	mu.RLock()
+	sites := configSites(cfg)
+	global := cfg.Interval
+	mu.RUnlock()
+	seen := map[string]bool{}
+	for _, site := range sites {
+		seen[site.Name] = true
+		if reset {
+			next[site.Name] = now.Add(time.Duration(effectiveInterval(site, global)) * time.Second)
+			continue
+		}
+		if _, ok := next[site.Name]; !ok {
+			next[site.Name] = now.Add(time.Duration(effectiveInterval(site, global)) * time.Second)
+		}
+	}
+	for name := range next {
+		if !seen[name] {
+			delete(next, name)
+		}
+	}
+}
+
+var scheduleNotify = make(chan struct{}, 1)
+
+func noteScheduleChange() {
+	select {
+	case scheduleNotify <- struct{}{}:
+	default:
+	}
+}
+
 func main() {
 	loadConfig()
 	initDB()
@@ -3216,13 +3327,48 @@ func main() {
 	hydrateStatus()
 
 	go func() {
-		refresh()
+		refresh(nil)
+		nextRun := map[string]time.Time{}
+		syncSiteSchedule(nextRun, time.Now(), true)
 		for {
-			mu.RLock()
-			sec := cfg.Interval
-			mu.RUnlock()
-			time.Sleep(time.Duration(sec) * time.Second)
-			refresh()
+			timer := time.NewTimer(time.Until(soonestRun(nextRun)))
+			select {
+			case <-scheduleNotify:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				syncSiteSchedule(nextRun, time.Now(), true)
+			case <-timer.C:
+				due := dueSiteNames(nextRun, time.Now())
+				if len(due) == 0 {
+					syncSiteSchedule(nextRun, time.Now(), false)
+					continue
+				}
+				only := map[string]bool{}
+				for _, name := range due {
+					only[name] = true
+				}
+				if !refresh(only) {
+					time.Sleep(time.Second)
+					continue
+				}
+				now := time.Now()
+				mu.RLock()
+				global := cfg.Interval
+				sites := configSites(cfg)
+				mu.RUnlock()
+				byName := map[string]Site{}
+				for _, site := range sites {
+					byName[site.Name] = site
+				}
+				for _, name := range due {
+					nextRun[name] = now.Add(time.Duration(effectiveInterval(byName[name], global)) * time.Second)
+				}
+				syncSiteSchedule(nextRun, now, false)
+			}
 		}
 	}()
 

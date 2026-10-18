@@ -24,7 +24,7 @@ import (
 const sessionCookie = "status_session"
 const sessionTTL = 7 * 24 * time.Hour
 
-var afterConfigChange = func() { go refresh() }
+var afterConfigChange = func() { go refresh(nil) }
 
 var (
 	sessionsMu sync.Mutex
@@ -83,6 +83,7 @@ func updateConfig(mut func(*Config) error) error {
 		return err
 	}
 	cfg = next
+	noteScheduleChange()
 	return nil
 }
 
@@ -151,8 +152,12 @@ func findGroup(groups []Group, name string) int {
 	return -1
 }
 
-func addSite(c *Config, name string) error {
+func addSite(c *Config, name string, interval int) error {
 	name, err := cleanName(name, "站点名称")
+	if err != nil {
+		return err
+	}
+	interval, err = cleanSiteInterval(interval)
 	if err != nil {
 		return err
 	}
@@ -164,11 +169,11 @@ func addSite(c *Config, name string) error {
 	if c.Sites == nil {
 		c.Sites = []Site{}
 	}
-	c.Sites = append(c.Sites, Site{Name: name, Groups: []Group{}})
+	c.Sites = append(c.Sites, Site{Name: name, Interval: interval, Groups: []Group{}})
 	return nil
 }
 
-func updateSite(c *Config, name, newName string) error {
+func updateSite(c *Config, name, newName string, interval int) error {
 	name = strings.TrimSpace(name)
 	idx := -1
 	for i := range c.Sites {
@@ -184,6 +189,10 @@ func updateSite(c *Config, name, newName string) error {
 	if err != nil {
 		return err
 	}
+	interval, err = cleanSiteInterval(interval)
+	if err != nil {
+		return err
+	}
 	if newName != name {
 		for _, site := range c.Sites {
 			if site.Name == newName {
@@ -192,6 +201,7 @@ func updateSite(c *Config, name, newName string) error {
 		}
 	}
 	c.Sites[idx].Name = newName
+	c.Sites[idx].Interval = interval
 	return nil
 }
 
@@ -1486,9 +1496,10 @@ func adminChangePassword(w http.ResponseWriter, r *http.Request) {
 }
 
 type siteBody struct {
-	Name    string   `json:"name"`
-	NewName string   `json:"newName"`
-	Order   []string `json:"order"`
+	Name     string   `json:"name"`
+	NewName  string   `json:"newName"`
+	Interval int      `json:"interval"`
+	Order    []string `json:"order"`
 }
 
 func adminSites(w http.ResponseWriter, r *http.Request) {
@@ -1499,7 +1510,7 @@ func adminSites(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPost:
 		finishChange(w, updateConfig(func(c *Config) error {
-			return addSite(c, body.Name)
+			return addSite(c, body.Name, body.Interval)
 		}), false)
 	case http.MethodPut:
 		newName := body.NewName
@@ -1507,7 +1518,7 @@ func adminSites(w http.ResponseWriter, r *http.Request) {
 			newName = body.Name
 		}
 		err := updateConfig(func(c *Config) error {
-			return updateSite(c, body.Name, newName)
+			return updateSite(c, body.Name, newName, body.Interval)
 		})
 		if err == nil {
 			renameSiteHistory(strings.TrimSpace(body.Name), strings.TrimSpace(newName))

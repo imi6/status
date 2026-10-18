@@ -200,7 +200,7 @@ button.drag:active{cursor:grabbing}
           </div>
           <label class="wide">页脚 HTML<textarea name="footer"></textarea></label>
         </div>
-        <p class="hint">后台路径就是地址里的目录名，不要用 admin 这种常见词。修改路径或端口后需要重启进程。状态页不会显示这个入口。默认接口地址会填进新建模型，留空则使用 https://zzshu.cc。弹窗公告留空则状态页不显示。访客关掉后，同一条内容不会再弹；改内容后会再次弹出。把机器人拉进目标群后填写 Token。群组每行一个，同一条状态会发到全部群。推送状态变化时发送一张分组状态图：名称、倍率、状态、成功率和最近检测的颜色点。图片下面是链接按钮，名称和链接都可以改，每排可以放 1 到 4 个。链接可写 https://zzshu.si、zzshu.si 或 @zhizhishuai。删光按钮后，图片下面不再放按钮。间隔填 0 时，状态一变化就发。填 30 则最多每 30 分钟发一次，没有变化不发。实际发送不会快过检测间隔。</p>
+        <p class="hint">检测间隔是站点没有单独填写时使用的兜底值，当前这一轮结束后才按新的间隔等待。后台路径就是地址里的目录名，不要用 admin 这种常见词。修改路径或端口后需要重启进程。状态页不会显示这个入口。默认接口地址会填进新建模型，留空则使用 https://zzshu.cc。弹窗公告留空则状态页不显示。访客关掉后，同一条内容不会再弹；改内容后会再次弹出。把机器人拉进目标群后填写 Token。群组每行一个，同一条状态会发到全部群。推送状态变化时发送一张分组状态图：名称、倍率、状态、成功率和最近检测的颜色点。图片下面是链接按钮，名称和链接都可以改，每排可以放 1 到 4 个。链接可写 https://zzshu.si、zzshu.si 或 @zhizhishuai。删光按钮后，图片下面不再放按钮。间隔填 0 时，状态一变化就发。填 30 则最多每 30 分钟发一次，没有变化不发。实际发送不会快过检测间隔。</p>
         <div class="row-actions"><button type="submit">保存站点设置</button><button type="button" class="ghost" id="tgTest">发送测试</button></div>
       </form>
     </section>
@@ -235,7 +235,7 @@ button.drag:active{cursor:grabbing}
       <p class="hint">先选监控站点，再管理这个站点里的分组和模型。状态页顶部可以切换站点。删除站点会去掉它下面的分组和模型，探测历史仍留在数据库里。</p>
       <div class="row-actions">
         <button type="button" id="addSiteBtn">添加站点</button>
-        <button type="button" class="ghost" id="editSiteBtn">重命名</button>
+        <button type="button" class="ghost" id="editSiteBtn">编辑</button>
         <button type="button" class="warn" id="delSiteBtn">删除站点</button>
         <button type="button" id="addGroupBtn">添加分组</button>
       </div>
@@ -252,7 +252,9 @@ button.drag:active{cursor:grabbing}
     <h2 id="siteFormTitle">添加站点</h2>
     <div class="grid">
       <label class="wide">站点名称<input name="name" required></label>
+      <label class="wide">检测间隔（秒）<input name="interval" type="number" min="0" max="86400" placeholder="留空使用全局间隔"></label>
     </div>
+    <p class="hint">留空或填 0 时，使用系统设置里的全局检测间隔。</p>
     <div class="row-actions">
       <button type="submit">保存</button>
       <button type="button" class="ghost" data-close="siteModal">取消</button>
@@ -444,7 +446,7 @@ function render(){
   currentSite();
   if (sites.length){
     siteTabs.hidden = false;
-    siteTabs.innerHTML = sites.map(s => '<button type="button" class="tab' + (s.name === _modelSite ? ' active' : '') + '" data-model-site="' + escapeHtml(s.name) + '">' + escapeHtml(s.name) + '</button>').join('');
+    siteTabs.innerHTML = sites.map(s => '<button type="button" class="tab' + (s.name === _modelSite ? ' active' : '') + '" data-model-site="' + escapeHtml(s.name) + '">' + escapeHtml(s.name) + (s.interval ? ' · ' + s.interval + '秒' : '') + '</button>').join('');
   } else {
     siteTabs.hidden = true;
     siteTabs.innerHTML = '';
@@ -589,14 +591,17 @@ $('addSiteBtn').addEventListener('click', () => {
   _siteEditing = {mode:'create'};
   $('siteFormTitle').textContent = '添加站点';
   $('siteForm').name.value = '';
+  $('siteForm').interval.value = '';
   openModal('siteModal');
   $('siteForm').name.focus();
 });
 $('editSiteBtn').addEventListener('click', () => {
   if (!_modelSite) { showMsg('还没有站点', true); return; }
   _siteEditing = {mode:'edit', original:_modelSite};
-  $('siteFormTitle').textContent = '重命名站点';
+  $('siteFormTitle').textContent = '编辑站点';
   $('siteForm').name.value = _modelSite;
+  const site = currentSite();
+  $('siteForm').interval.value = site && site.interval ? site.interval : '';
   openModal('siteModal');
   $('siteForm').name.focus();
 });
@@ -613,9 +618,9 @@ $('siteForm').addEventListener('submit', async (e) => {
   const name = e.target.name.value;
   try {
     if (_siteEditing && _siteEditing.mode === 'edit') {
-      await api('/api/admin/sites', {method:'PUT', body:{name:_siteEditing.original, newName:name}});
+      await api('/api/admin/sites', {method:'PUT', body:{name:_siteEditing.original, newName:name, interval:Number(e.target.interval.value || 0)}});
     } else {
-      await api('/api/admin/sites', {method:'POST', body:{name}});
+      await api('/api/admin/sites', {method:'POST', body:{name, interval:Number(e.target.interval.value || 0)}});
     }
     _modelSite = name.trim();
     hideForms();

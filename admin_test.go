@@ -477,6 +477,21 @@ func TestTelegramLogNewestFirst(t *testing.T) {
 	}
 }
 
+func TestEffectiveIntervalUsesGlobalAsFallback(t *testing.T) {
+	if effectiveInterval(Site{}, 600) != 600 {
+		t.Fatal("global")
+	}
+	if effectiveInterval(Site{Interval: 30}, 600) != 30 {
+		t.Fatal("site")
+	}
+	if _, err := cleanSiteInterval(3); err == nil {
+		t.Fatal("expected short interval error")
+	}
+	if got, err := cleanSiteInterval(0); err != nil || got != 0 {
+		t.Fatal(got, err)
+	}
+}
+
 func TestSameGroupNameOnTwoSites(t *testing.T) {
 	c := Config{Sites: []Site{{Name: "甲", Groups: []Group{}}, {Name: "乙", Groups: []Group{}}}}
 	if err := addGroup(&c, "甲", "GPT", false); err != nil {
