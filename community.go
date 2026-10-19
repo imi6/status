@@ -574,6 +574,72 @@ func importCodes(cents int, raw string) (int, error) {
 	return added, nil
 }
 
+func listAvailableCodes(limit int) []availableCode {
+	if limit <= 0 {
+		limit = 300
+	}
+	rows, err := db.Query(`SELECT id, code, amount_cents FROM reward_codes WHERE status = 'available' ORDER BY amount_cents, id LIMIT ?`, limit)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []availableCode
+	for rows.Next() {
+		var item availableCode
+		var cents int
+		if rows.Scan(&item.ID, &item.Code, &cents) != nil {
+			continue
+		}
+		item.Yuan = formatYuan(cents)
+		out = append(out, item)
+	}
+	return out
+}
+
+func deleteAvailableCodes(ids []int64, raw string, cents int, allOfAmount bool) (int, error) {
+	removed := 0
+	drop := func(res interface{ RowsAffected() (int64, error) }, err error) {
+		if err != nil {
+			return
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			removed += int(n)
+		}
+	}
+	if allOfAmount {
+		if cents <= 0 {
+			return 0, errors.New("请先填写额度")
+		}
+		res, err := db.Exec(`DELETE FROM reward_codes WHERE status = 'available' AND amount_cents = ?`, cents)
+		drop(res, err)
+	}
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		res, err := db.Exec(`DELETE FROM reward_codes WHERE id = ? AND status = 'available'`, id)
+		drop(res, err)
+	}
+	for _, line := range strings.Split(raw, "\n") {
+		code := strings.TrimSpace(line)
+		if code == "" {
+			continue
+		}
+		res, err := db.Exec(`DELETE FROM reward_codes WHERE code = ? AND status = 'available'`, code)
+		drop(res, err)
+	}
+	if removed == 0 {
+		return 0, errors.New("没有可删除的未使用兑换码")
+	}
+	return removed, nil
+}
+
+type availableCode struct {
+	ID   int64  `json:"id"`
+	Code string `json:"code"`
+	Yuan string `json:"yuan"`
+}
+
 type codeStockItem struct {
 	Yuan   string `json:"yuan"`
 	Cents  int    `json:"cents"`
@@ -639,6 +705,7 @@ func adminCommunity(w http.ResponseWriter, r *http.Request) {
 		writeAdminJSON(w, 200, map[string]any{
 			"config": loadCommunityConfig(),
 			"stock":  codeStock(),
+			"codes":  listAvailableCodes(300),
 			"logs":   recentRewards(40),
 			"speech": speechToday(time.Now()),
 		})
@@ -658,28 +725,54 @@ func adminCommunity(w http.ResponseWriter, r *http.Request) {
 }
 
 func adminCommunityCodes(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
+	switch r.Method {
+	case http.MethodPost:
+		var body struct {
+			Amount string `json:"amount"`
+			Codes  string `json:"codes"`
+		}
+		if !decodeBody(w, r, &body) {
+			return
+		}
+		cents, err := parseYuan(body.Amount)
+		if err != nil {
+			writeAdminJSON(w, 400, map[string]string{"error": "额度格式不正确，例如 1 或 5"})
+			return
+		}
+		added, err := importCodes(cents, body.Codes)
+		if err != nil {
+			writeAdminJSON(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
+		writeAdminJSON(w, 200, map[string]any{"ok": true, "added": added})
+	case http.MethodDelete:
+		var body struct {
+			IDs    []int64 `json:"ids"`
+			Codes  string  `json:"codes"`
+			Amount string  `json:"amount"`
+			All    bool    `json:"all"`
+		}
+		if !decodeBody(w, r, &body) {
+			return
+		}
+		cents := 0
+		if body.All {
+			var err error
+			cents, err = parseYuan(body.Amount)
+			if err != nil {
+				writeAdminJSON(w, 400, map[string]string{"error": "额度格式不正确，例如 1 或 5"})
+				return
+			}
+		}
+		removed, err := deleteAvailableCodes(body.IDs, body.Codes, cents, body.All)
+		if err != nil {
+			writeAdminJSON(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
+		writeAdminJSON(w, 200, map[string]any{"ok": true, "removed": removed})
+	default:
 		writeAdminJSON(w, 405, map[string]string{"error": "method not allowed"})
-		return
 	}
-	var body struct {
-		Amount string `json:"amount"`
-		Codes  string `json:"codes"`
-	}
-	if !decodeBody(w, r, &body) {
-		return
-	}
-	cents, err := parseYuan(body.Amount)
-	if err != nil {
-		writeAdminJSON(w, 400, map[string]string{"error": "额度格式不正确，例如 1 或 5"})
-		return
-	}
-	added, err := importCodes(cents, body.Codes)
-	if err != nil {
-		writeAdminJSON(w, 400, map[string]string{"error": err.Error()})
-		return
-	}
-	writeAdminJSON(w, 200, map[string]any{"ok": true, "added": added})
 }
 
 func joinSpeech(msg communityMessage, now time.Time) (string, string) {
@@ -718,37 +811,38 @@ func speechCount(userID int64, day string) int {
 	return n
 }
 
-func recordSpeech(msg communityMessage, now time.Time) {
+func recordSpeech(msg communityMessage, now time.Time) string {
 	if db == nil || msg.UserID == 0 || msg.ChatID == msg.UserID {
-		return
+		return ""
 	}
 	text := strings.TrimSpace(msg.Text)
 	if text == "" || strings.HasPrefix(text, "/") {
-		return
+		return ""
 	}
 	conf := loadCommunityConfig()
 	if !conf.Enabled {
-		return
+		return ""
 	}
 	want := communityChatID(conf)
 	if want == "" || strconv.FormatInt(msg.ChatID, 10) != want {
-		return
+		return ""
 	}
 	if !speechMember(msg.UserID) {
-		return
+		return ""
 	}
 	text = strings.Join(strings.Fields(text), " ")
 	day := speechDay(now)
 	res, err := db.Exec(`INSERT INTO daily_speech_lines (day, user_id, body) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`, day, msg.UserID, text)
 	if err != nil {
-		return
+		return ""
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return
+		return fmt.Sprintf("这句话今天已经记过。今日发言 %d/%d。", speechCount(msg.UserID, day), conf.SpeechNeed)
 	}
 	_, _ = db.Exec(`INSERT INTO daily_speech (day, user_id, user_name, messages, rewarded) VALUES (?, ?, ?, 1, 0)
 		ON CONFLICT(day, user_id) DO UPDATE SET messages = messages + 1, user_name = excluded.user_name`,
 		day, msg.UserID, msg.displayName())
+	return fmt.Sprintf("%s 今日发言 %d/%d。", msg.displayName(), speechCount(msg.UserID, day), conf.SpeechNeed)
 }
 
 type speechSnapshot struct {
@@ -1042,8 +1136,10 @@ func pollCommunityOnce() error {
 			msg.ReplyMessageID = item.Message.Reply.MessageID
 		}
 		groupReply, code := applyCommunity(msg, time.Now())
+		if note := recordSpeech(msg, time.Now()); groupReply == "" && note != "" {
+			groupReply = note
+		}
 		deliverCommunity(msg, groupReply, code)
-		recordSpeech(msg, time.Now())
 	}
 	if next != offset {
 		_ = stateSet("update_offset", strconv.Itoa(next))

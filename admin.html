@@ -274,6 +274,17 @@ button.drag:active{cursor:grabbing}
         <p class="hint" id="cdkStock">库存读取中…</p>
         <div class="row-actions"><button type="submit">导入</button></div>
       </form>
+      <form id="cdkDeleteForm">
+        <div class="grid">
+          <label class="wide">批量删除<textarea name="codes" placeholder="每行一个，只删除还没发出去的"></textarea></label>
+        </div>
+        <div id="cdkList"></div>
+        <div class="row-actions">
+          <button type="button" class="ghost" id="cdkSelectAll">全选</button>
+          <button type="submit" class="warn">删除选中和文本中的码</button>
+          <button type="button" class="warn" id="cdkDeleteAmount">删除当前额度的未使用码</button>
+        </div>
+      </form>
     </section>
     <section class="card">
       <h2>最近积分</h2>
@@ -1022,6 +1033,18 @@ async function loadCommunity(){
     const stock = data.stock || [];
     const speech = data.speech || {};
     $('cdkStock').textContent = (stock.length ? ('库存 ' + stock.map(item => item.yuan + '元 × ' + item.count + '（' + item.points + '积分）').join(' · ')) : '暂无 CDK。') + ' 今日报名 ' + (speech.members || 0) + '，已发言 ' + (speech.speakers || 0) + '，满条数 ' + (speech.qualified || 0) + '。';
+    const codes = data.codes || [];
+    const list = $('cdkList');
+    list.replaceChildren();
+    codes.forEach(item => {
+      const label = document.createElement('label');
+      label.className = 'check';
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.value = String(item.id);
+      label.append(input, ' ' + item.yuan + '元 ' + item.code);
+      list.append(label);
+    });
     const logs = data.logs || [];
     $('communityLog').textContent = logs.length ? logs.map(item => item.time + '  ' + item.text).join('\n') : '还没有积分记录。';
   } catch (err) {
@@ -1053,6 +1076,36 @@ $('cdkForm').addEventListener('submit', async (e) => {
     const data = await api('/api/admin/community-codes', {method:'POST', body:{amount:f.amount.value, codes:f.codes.value}});
     f.codes.value = '';
     showMsg('已导入 ' + (data.added || 0) + ' 个兑换码。', false);
+    loadCommunity();
+  } catch (err) { showMsg(err.message, true); }
+});
+$('cdkDeleteForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const ids = [...$('cdkList').querySelectorAll('input:checked')].map(input => Number(input.value));
+  const codes = e.target.codes.value;
+  if (!ids.length && !codes.trim()) {
+    showMsg('请勾选兑换码，或在文本框里每行填一个。', true);
+    return;
+  }
+  if (!confirm('删除选中的未使用兑换码？已发出的不会删除。')) return;
+  try {
+    const data = await api('/api/admin/community-codes', {method:'DELETE', body:{ids, codes}});
+    e.target.codes.value = '';
+    showMsg('已删除 ' + (data.removed || 0) + ' 个兑换码。', false);
+    loadCommunity();
+  } catch (err) { showMsg(err.message, true); }
+});
+$('cdkSelectAll').addEventListener('click', () => {
+  const boxes = [...$('cdkList').querySelectorAll('input')];
+  const on = boxes.some(input => !input.checked);
+  boxes.forEach(input => { input.checked = on; });
+});
+$('cdkDeleteAmount').addEventListener('click', async () => {
+  const amount = $('cdkForm').amount.value;
+  if (!confirm('删除额度 ' + amount + ' 元的全部未使用兑换码？')) return;
+  try {
+    const data = await api('/api/admin/community-codes', {method:'DELETE', body:{all:true, amount}});
+    showMsg('已删除 ' + (data.removed || 0) + ' 个兑换码。', false);
     loadCommunity();
   } catch (err) { showMsg(err.message, true); }
 });

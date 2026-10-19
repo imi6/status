@@ -183,3 +183,35 @@ func TestDailySpeechNeedsJoinedQuorum(t *testing.T) {
 		t.Fatalf("sent %#v", sent)
 	}
 }
+
+func TestDeleteAvailableCodes(t *testing.T) {
+	openCommunityDB(t)
+	conf := defaultCommunityConfig()
+	conf.MinPoints = 1
+	conf.RatePoints = 1
+	conf.RateYuan = "1"
+	if err := saveCommunityConfig(conf); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := importCodes(100, "CDK-A\nCDK-B\nCDK-C\n"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE reward_codes SET status = 'used' WHERE code = 'CDK-C'`); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := deleteAvailableCodes(nil, "CDK-A\nCDK-C\n", 0, false)
+	if err != nil || removed != 1 {
+		t.Fatalf("removed %d err %v", removed, err)
+	}
+	removed, err = deleteAvailableCodes(nil, "", 100, true)
+	if err != nil || removed != 1 {
+		t.Fatalf("amount removed %d err %v", removed, err)
+	}
+	var left int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM reward_codes`).Scan(&left); err != nil {
+		t.Fatal(err)
+	}
+	if left != 1 {
+		t.Fatalf("left %d", left)
+	}
+}
