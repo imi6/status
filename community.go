@@ -100,6 +100,7 @@ func ensureCommunityTables() error {
 	}
 	_, _ = db.Exec(`ALTER TABLE reward_logs ADD COLUMN points INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE reward_codes ADD COLUMN amount_cents INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE daily_speech_lines ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0`)
 	return nil
 }
 
@@ -703,11 +704,12 @@ func adminCommunity(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		writeAdminJSON(w, 200, map[string]any{
-			"config": loadCommunityConfig(),
-			"stock":  codeStock(),
-			"codes":  listAvailableCodes(300),
-			"logs":   recentRewards(40),
-			"speech": speechToday(time.Now()),
+			"config":    loadCommunityConfig(),
+			"stock":     codeStock(),
+			"codes":     listAvailableCodes(300),
+			"logs":      recentRewards(40),
+			"speech":    speechToday(time.Now()),
+			"dashboard": speechDashboard(time.Now()),
 		})
 	case http.MethodPut:
 		var body CommunityConfig
@@ -832,7 +834,7 @@ func recordSpeech(msg communityMessage, now time.Time) {
 	}
 	text = strings.Join(strings.Fields(text), " ")
 	day := speechDay(now)
-	res, err := db.Exec(`INSERT INTO daily_speech_lines (day, user_id, body) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`, day, msg.UserID, text)
+	res, err := db.Exec(`INSERT INTO daily_speech_lines (day, user_id, body, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(day, user_id, body) DO NOTHING`, day, msg.UserID, text, now.Unix())
 	if err != nil {
 		return
 	}
@@ -857,6 +859,101 @@ func speechToday(now time.Time) speechSnapshot {
 	_ = db.QueryRow(`SELECT COUNT(*) FROM community_members`).Scan(&out.Members)
 	_ = db.QueryRow(`SELECT COUNT(*) FROM daily_speech s JOIN community_members m ON m.user_id = s.user_id WHERE s.day = ? AND s.messages > 0`, day).Scan(&out.Speakers)
 	_ = db.QueryRow(`SELECT COUNT(*) FROM daily_speech s JOIN community_members m ON m.user_id = s.user_id WHERE s.day = ? AND s.messages >= ?`, day, conf.SpeechNeed).Scan(&out.Qualified)
+	return out
+}
+
+type dashUser struct {
+	UserID   int64  `json:"userID"`
+	Name     string `json:"name"`
+	Today    int    `json:"today"`
+	Total    int    `json:"total"`
+	Days     int    `json:"days"`
+	Rewarded int    `json:"rewarded"`
+	LastDay  string `json:"lastDay"`
+}
+
+type dashDay struct {
+	Day      string `json:"day"`
+	Speakers int    `json:"speakers"`
+	Messages int    `json:"messages"`
+	Rewarded int    `json:"rewarded"`
+}
+
+type dashLine struct {
+	Time   string `json:"time"`
+	Day    string `json:"day"`
+	UserID int64  `json:"userID"`
+	Name   string `json:"name"`
+	Text   string `json:"text"`
+}
+
+type speechDash struct {
+	Members     int        `json:"members"`
+	Speakers    int        `json:"speakers"`
+	Qualified   int        `json:"qualified"`
+	Messages    int        `json:"messages"`
+	Need        int        `json:"need"`
+	MinSpeakers int        `json:"minSpeakers"`
+	Users       []dashUser `json:"users"`
+	Days        []dashDay  `json:"days"`
+	Lines       []dashLine `json:"lines"`
+}
+
+func speechDashboard(now time.Time) speechDash {
+	conf := loadCommunityConfig()
+	today := speechToday(now)
+	out := speechDash{
+		Members: today.Members, Speakers: today.Speakers, Qualified: today.Qualified,
+		Need: conf.SpeechNeed, MinSpeakers: conf.MinSpeakers,
+		Users: []dashUser{}, Days: []dashDay{}, Lines: []dashLine{},
+	}
+	day := speechDay(now)
+	_ = db.QueryRow(`SELECT COALESCE(SUM(messages), 0) FROM daily_speech WHERE day = ?`, day).Scan(&out.Messages)
+	rows, err := db.Query(`SELECT user_id, MAX(user_name),
+		SUM(CASE WHEN day = ? THEN messages ELSE 0 END),
+		SUM(messages), COUNT(*), SUM(rewarded), MAX(day)
+		FROM daily_speech GROUP BY user_id
+		ORDER BY 3 DESC, 4 DESC, user_id`, day)
+	if err == nil {
+		for rows.Next() {
+			var item dashUser
+			if rows.Scan(&item.UserID, &item.Name, &item.Today, &item.Total, &item.Days, &item.Rewarded, &item.LastDay) == nil {
+				out.Users = append(out.Users, item)
+			}
+		}
+		rows.Close()
+	}
+	rows, err = db.Query(`SELECT day, COUNT(*), COALESCE(SUM(messages), 0), COALESCE(SUM(rewarded), 0)
+		FROM daily_speech GROUP BY day ORDER BY day DESC LIMIT 30`)
+	if err == nil {
+		for rows.Next() {
+			var item dashDay
+			if rows.Scan(&item.Day, &item.Speakers, &item.Messages, &item.Rewarded) == nil {
+				out.Days = append(out.Days, item)
+			}
+		}
+		rows.Close()
+	}
+	rows, err = db.Query(`SELECT l.day, l.created_at, l.user_id, COALESCE(s.user_name, ''), l.body
+		FROM daily_speech_lines l
+		LEFT JOIN daily_speech s ON s.day = l.day AND s.user_id = l.user_id
+		ORDER BY l.created_at DESC, l.rowid DESC LIMIT 300`)
+	if err == nil {
+		for rows.Next() {
+			var item dashLine
+			var ts int64
+			if rows.Scan(&item.Day, &ts, &item.UserID, &item.Name, &item.Text) != nil {
+				continue
+			}
+			if ts > 0 {
+				item.Time = time.Unix(ts, 0).In(shanghai).Format("01-02 15:04")
+			} else {
+				item.Time = item.Day
+			}
+			out.Lines = append(out.Lines, item)
+		}
+		rows.Close()
+	}
 	return out
 }
 

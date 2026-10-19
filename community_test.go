@@ -215,3 +215,29 @@ func TestDeleteAvailableCodes(t *testing.T) {
 		t.Fatalf("left %d", left)
 	}
 }
+
+func TestSpeechDashboard(t *testing.T) {
+	openCommunityDB(t)
+	conf := defaultCommunityConfig()
+	conf.Enabled = true
+	conf.ChatID = "-1001"
+	conf.SpeechNeed = 2
+	if err := saveCommunityConfig(conf); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 10, 19, 12, 0, 0, 0, shanghai)
+	ada := communityMessage{ChatID: -1001, UserID: 7, UserName: "ada", Text: "/join"}
+	applyCommunity(ada, now)
+	ada.Text = "hello"
+	recordSpeech(ada, now)
+	recordSpeech(ada, now)
+	ada.Text = "world"
+	recordSpeech(ada, now)
+	dash := speechDashboard(now)
+	if dash.Messages != 2 || dash.Speakers != 1 || len(dash.Users) != 1 || dash.Users[0].Today != 2 || dash.Users[0].Total != 2 {
+		t.Fatalf("dash %+v users %+v", dash, dash.Users)
+	}
+	if len(dash.Lines) != 2 || len(dash.Days) != 1 || dash.Days[0].Messages != 2 {
+		t.Fatalf("lines %d days %+v", len(dash.Lines), dash.Days)
+	}
+}
