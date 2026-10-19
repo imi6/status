@@ -811,38 +811,37 @@ func speechCount(userID int64, day string) int {
 	return n
 }
 
-func recordSpeech(msg communityMessage, now time.Time) string {
+func recordSpeech(msg communityMessage, now time.Time) {
 	if db == nil || msg.UserID == 0 || msg.ChatID == msg.UserID {
-		return ""
+		return
 	}
 	text := strings.TrimSpace(msg.Text)
 	if text == "" || strings.HasPrefix(text, "/") {
-		return ""
+		return
 	}
 	conf := loadCommunityConfig()
 	if !conf.Enabled {
-		return ""
+		return
 	}
 	want := communityChatID(conf)
 	if want == "" || strconv.FormatInt(msg.ChatID, 10) != want {
-		return ""
+		return
 	}
 	if !speechMember(msg.UserID) {
-		return ""
+		return
 	}
 	text = strings.Join(strings.Fields(text), " ")
 	day := speechDay(now)
 	res, err := db.Exec(`INSERT INTO daily_speech_lines (day, user_id, body) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`, day, msg.UserID, text)
 	if err != nil {
-		return ""
+		return
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Sprintf("这句话今天已经记过。今日发言 %d/%d。", speechCount(msg.UserID, day), conf.SpeechNeed)
+		return
 	}
 	_, _ = db.Exec(`INSERT INTO daily_speech (day, user_id, user_name, messages, rewarded) VALUES (?, ?, ?, 1, 0)
 		ON CONFLICT(day, user_id) DO UPDATE SET messages = messages + 1, user_name = excluded.user_name`,
 		day, msg.UserID, msg.displayName())
-	return fmt.Sprintf("%s 今日发言 %d/%d。", msg.displayName(), speechCount(msg.UserID, day), conf.SpeechNeed)
 }
 
 type speechSnapshot struct {
@@ -1136,9 +1135,7 @@ func pollCommunityOnce() error {
 			msg.ReplyMessageID = item.Message.Reply.MessageID
 		}
 		groupReply, code := applyCommunity(msg, time.Now())
-		if note := recordSpeech(msg, time.Now()); groupReply == "" && note != "" {
-			groupReply = note
-		}
+		recordSpeech(msg, time.Now())
 		deliverCommunity(msg, groupReply, code)
 	}
 	if next != offset {
