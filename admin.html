@@ -561,7 +561,7 @@ function render(){
     const subHtml = subs.length ? subs.map(sg => {
       const models = sg.models || [];
       const modelHtml = models.length ? models.map((m, mi) => (
-        '<div class="model"><div><b>' + escapeHtml(m.id) + '</b><span>' + escapeHtml(providerLabel(m.provider)) + ' · ' + escapeHtml(m.baseURL || '') + ' · ' + escapeHtml(maskKey(m.key)) + ' · ' + (m.timeout || 30) + 's</span></div><div class="links"><button type="button" data-act="edit-model" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '" data-index="' + mi + '">编辑</button> <button type="button" class="warn" data-act="del-model" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '" data-index="' + mi + '">删除</button></div></div>'
+        '<div class="model"><div><b>' + escapeHtml(m.id) + '</b><span>' + escapeHtml(providerLabel(m.provider)) + ' · ' + escapeHtml(m.baseURL || '') + ' · ' + escapeHtml(maskKey(m.key)) + ' · ' + (m.timeout || 30) + 's</span></div><div class="links"><button type="button" data-act="edit-model" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '" data-index="' + mi + '">编辑</button> <button type="button" class="warn" data-act="del-model" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '" data-index="' + mi + '">删除</button> <button type="button" class="ghost" data-act="test-model" data-group="' + escapeHtml(g.name) + '" data-sub="' + escapeHtml(sg.name) + '" data-index="' + mi + '">测试</button></div></div>'
       )).join('') : '<p class="empty">此子组还没有模型。</p>';
       const ratioText = String(sg.ratio || '').trim();
       const metaBits = [];
@@ -1060,6 +1060,18 @@ $('groups').addEventListener('click', (e) => {
   } else if (act === 'del-model') {
     if (!confirm('删除这个模型？')) return;
     api('/api/admin/models', {method:'DELETE', body:{site:_modelSite, group, subgroup:sub, index:Number(btn.dataset.index)}}).then(() => reload('模型已删除。')).catch(err => showMsg(err.message, true));
+  } else if (act === 'test-model') {
+    const index = Number(btn.dataset.index);
+    btn.disabled = true;
+    btn.textContent = '测试中';
+    api('/api/admin/model-test', {method:'POST', body:{site:_modelSite, group, subgroup:sub, index}}).then(data => {
+      const delay = ((Number(data.latency) || 0) / 1000).toFixed(2) + 's';
+      const result = data.up ? '成功' : '失败';
+      showMsg(group + ' / ' + sub + ' 测试' + result + '，延迟 ' + delay + (data.reason ? '，' + data.reason : '') + '。结果已写入状态页。', !data.up);
+    }).catch(err => showMsg(err.message, true)).finally(() => {
+      btn.disabled = false;
+      btn.textContent = '测试';
+    });
   }
 });
 

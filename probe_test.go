@@ -460,3 +460,58 @@ func TestProbeFailReasonUsesAPIMessage(t *testing.T) {
 		t.Fatal(probeFailReason(200, []byte(`{"choices":[]}`)))
 	}
 }
+
+func TestModelTestWritesOnlyThatSubgroup(t *testing.T) {
+	oldDB := db
+	opened, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "one.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db = opened
+	t.Cleanup(func() {
+		opened.Close()
+		db = oldDB
+	})
+	if err := ensureSchema(); err != nil {
+		t.Fatal(err)
+	}
+	oldCfg := cfg
+	oldStatus := statusV2
+	t.Cleanup(func() {
+		cfg = oldCfg
+		statusV2 = oldStatus
+	})
+	var gotKey string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotKey = r.Header.Get("authorization")
+		io.WriteString(w, `{"choices":[{"message":{"content":"OK"}}]}`)
+	}))
+	defer srv.Close()
+	model := func(key string) Model {
+		return Model{ID: "gpt-5.6-terra", Provider: "openai-compat", BaseURL: srv.URL, Key: key, Timeout: 5}
+	}
+	cfg = Config{Sites: []Site{{Name: "S", Groups: []Group{{
+		Name: "GPT",
+		SubGroups: []SubGroup{
+			{Name: "特惠", Models: []Model{model("sk-a")}},
+			{Name: "Plus", Models: []Model{model("sk-b")}},
+		},
+	}}}}}
+	up, _, reason, err := testConfiguredModel("S", "GPT", "特惠", 0)
+	if err != nil || !up || reason != "" {
+		t.Fatalf("up %v reason %q err %v", up, reason, err)
+	}
+	if gotKey != "Bearer sk-a" {
+		t.Fatalf("key %s", gotKey)
+	}
+	var plus, deal int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM checks WHERE sub_name = 'Plus'`).Scan(&plus); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM checks WHERE sub_name = '特惠' AND model_id = 'gpt-5.6-terra' AND up = 1`).Scan(&deal); err != nil {
+		t.Fatal(err)
+	}
+	if plus != 0 || deal != 1 {
+		t.Fatalf("plus %d deal %d", plus, deal)
+	}
+}

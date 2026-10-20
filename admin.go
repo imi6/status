@@ -565,6 +565,37 @@ func modelAt(c *Config, site, group, sub string, index int) (*Model, error) {
 	return &(*groups)[gi].SubGroups[si].Models[index], nil
 }
 
+func testConfiguredModel(site, group, sub string, index int) (bool, int, string, error) {
+	site = strings.TrimSpace(site)
+	group = strings.TrimSpace(group)
+	sub = strings.TrimSpace(sub)
+	mu.RLock()
+	cur, err := modelAt(&cfg, site, group, sub, index)
+	var m Model
+	var ratio string
+	if err == nil {
+		m = *cur
+		if groups, gerr := groupsAt(&cfg, site); gerr == nil {
+			if gi := findGroup(*groups, group); gi >= 0 {
+				if si := findSub(&(*groups)[gi], sub); si >= 0 {
+					ratio = (*groups)[gi].SubGroups[si].Ratio
+				}
+			}
+		}
+	}
+	mu.RUnlock()
+	if err != nil {
+		return false, 0, "", err
+	}
+	up, lat, reason := checkOne(m)
+	saveCheck(site, group, sub, m.ID, up, lat, reason)
+	mu.RLock()
+	sections := append([]Section(nil), statusV2.Sections...)
+	mu.RUnlock()
+	updateRow(site, group, SubGroup{Name: sub, Ratio: ratio}, m, &sections, up, lat)
+	return up, lat, reason, nil
+}
+
 func addModel(c *Config, site, group, sub string, m Model) error {
 	groups, err := groupsAt(c, site)
 	if err != nil {
@@ -1264,6 +1295,11 @@ func apiAdmin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		adminModels(w, r)
+	case "model-test":
+		if !requireAdmin(w, r) {
+			return
+		}
+		adminTestModel(w, r)
 	case "upstream-models":
 		if !requireAdmin(w, r) {
 			return
@@ -1693,6 +1729,33 @@ func adminModels(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeAdminJSON(w, 405, map[string]string{"error": "method not allowed"})
 	}
+}
+
+func adminTestModel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeAdminJSON(w, 405, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var body struct {
+		Site     string `json:"site"`
+		Group    string `json:"group"`
+		Subgroup string `json:"subgroup"`
+		Index    int    `json:"index"`
+	}
+	if !decodeBody(w, r, &body) {
+		return
+	}
+	up, lat, reason, err := testConfiguredModel(body.Site, body.Group, body.Subgroup, body.Index)
+	if err != nil {
+		writeAdminJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+	writeAdminJSON(w, 200, map[string]any{
+		"ok":      true,
+		"up":      up,
+		"latency": lat,
+		"reason":  reason,
+	})
 }
 
 func adminUpstreamModels(w http.ResponseWriter, r *http.Request) {

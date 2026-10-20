@@ -1762,7 +1762,7 @@ func updateRow(site, gName string, sg SubGroup, m Model, sections *[]Section, up
 	statusV2 = StatusRespV2{
 		Title:    cfg.Frontend.Title,
 		Overall:  OverallStatus{Status: overallStatus, Label: overallLabel},
-		Checking: true,
+		Checking: checking,
 		Sites:    packSites(*sections, configSites(cfg)),
 		Sections: *sections,
 	}
