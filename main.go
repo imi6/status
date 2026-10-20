@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/tls"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -1217,7 +1216,7 @@ func checkOpenAIImage(m Model) (bool, int, string) {
 	if err != nil {
 		return false, 0, "探测请求无法生成"
 	}
-	code, resp, lat, netErr := doPost(base+"/images/generations", m.Key, body, m.Timeout)
+	code, resp, lat, netErr := doPostWithLimit(base+"/images/generations", m.Key, body, m.Timeout, imageResponseLimit)
 	return finishProbe(code, resp, lat, netErr, imageHasResult(resp))
 }
 
@@ -1299,7 +1298,7 @@ func checkGoogleImage(m Model) (bool, int, string) {
 		req.Header.Set("authorization", "Bearer "+m.Key)
 		req.Header.Set("x-goog-api-key", m.Key)
 	}
-	code, resp, lat, netErr := doReq(req, m.Timeout)
+	code, resp, lat, netErr := doReqWithLimit(req, m.Timeout, imageResponseLimit)
 	return finishProbe(code, resp, lat, netErr, googleHasImage(resp))
 }
 
@@ -1326,42 +1325,6 @@ func checkAnthropic(m Model) (bool, int, string) {
 	req.Header.Set("content-type", "application/json")
 	code, resp, lat, netErr := doReq(req, m.Timeout)
 	return finishProbe(code, resp, lat, netErr, anthropicHasReply(resp))
-}
-
-func doPost(url, key string, body []byte, timeout int) (int, []byte, int, string) {
-	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
-	if err != nil {
-		return 0, nil, 0, "探测请求无法生成"
-	}
-	req.Header.Set("content-type", "application/json")
-	if key != "" {
-		req.Header.Set("authorization", "Bearer "+key)
-	}
-	return doReq(req, timeout)
-}
-
-func doReq(req *http.Request, timeout int) (int, []byte, int, string) {
-	if timeout == 0 {
-		timeout = 30
-	}
-	client := &http.Client{
-		Timeout: time.Duration(timeout) * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		},
-	}
-	start := time.Now()
-	resp, err := client.Do(req)
-	lat := int(time.Since(start).Milliseconds())
-	if err != nil {
-		return 0, nil, lat, shortNetErr(err)
-	}
-	defer resp.Body.Close()
-	b, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return resp.StatusCode, nil, lat, "读取响应失败"
-	}
-	return resp.StatusCode, b, lat, ""
 }
 
 func finishProbe(code int, body []byte, lat int, netErr string, ok bool) (bool, int, string) {
@@ -1422,24 +1385,6 @@ func apiErrorMessage(raw []byte) string {
 		return strings.TrimSpace(obj.Message)
 	}
 	return ""
-}
-
-func shortNetErr(err error) string {
-	s := strings.ToLower(err.Error())
-	switch {
-	case strings.Contains(s, "timeout"), strings.Contains(s, "deadline"):
-		return "请求超时"
-	case strings.Contains(s, "connection refused"):
-		return "连接被拒绝"
-	case strings.Contains(s, "no such host"):
-		return "域名无法解析"
-	case strings.Contains(s, "connection reset"):
-		return "连接被重置"
-	case strings.Contains(s, "tls"), strings.Contains(s, "certificate"):
-		return "证书校验失败"
-	default:
-		return "网络错误"
-	}
 }
 
 func clipText(s string, n int) string {
@@ -2053,32 +1998,40 @@ func runProbes(targets []probeTarget, sections *[]Section, saveFailure bool) (fa
 	}
 	var wg sync.WaitGroup
 	var resultMu sync.Mutex
-	wg.Add(len(targets))
-	for _, target := range targets {
-		go func(target probeTarget) {
+	workers := min(len(targets), maxConcurrentProbes)
+	jobs := make(chan probeTarget)
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
 			defer wg.Done()
-			up, lat, reason := checkOne(target.m)
-			if up || saveFailure {
-				saveCheck(target.site, target.gName, target.sgName, target.m.ID, up, lat, reason)
+			for target := range jobs {
+				up, lat, reason := checkOne(target.m)
+				if up || saveFailure {
+					saveCheck(target.site, target.gName, target.sgName, target.m.ID, up, lat, reason)
+				}
+				if !up && saveFailure && reason != "" {
+					log.Printf("probe %s/%s: %s", target.gName, target.m.ID, reason)
+				}
+				if up {
+					resultMu.Lock()
+					totalLat += lat
+					latCount++
+					resultMu.Unlock()
+				} else if !saveFailure {
+					resultMu.Lock()
+					failed = append(failed, target)
+					resultMu.Unlock()
+				}
+				if up || saveFailure {
+					updateRow(target.site, target.gName, SubGroup{Name: target.sgName, Ratio: target.ratio}, target.m, sections, up, lat)
+				}
 			}
-			if !up && saveFailure && reason != "" {
-				log.Printf("probe %s/%s: %s", target.gName, target.m.ID, reason)
-			}
-			if up {
-				resultMu.Lock()
-				totalLat += lat
-				latCount++
-				resultMu.Unlock()
-			} else if !saveFailure {
-				resultMu.Lock()
-				failed = append(failed, target)
-				resultMu.Unlock()
-			}
-			if up || saveFailure {
-				updateRow(target.site, target.gName, SubGroup{Name: target.sgName, Ratio: target.ratio}, target.m, sections, up, lat)
-			}
-		}(target)
+		}()
 	}
+	for _, target := range targets {
+		jobs <- target
+	}
+	close(jobs)
 	wg.Wait()
 	return failed, totalLat, latCount
 }
@@ -2164,18 +2117,23 @@ func refresh(only map[string]bool) bool {
 	checking = false
 	mu.Unlock()
 
-	// push to Uptime Kuma
+	mu.RLock()
+	kuma := cfg.Kuma
+	kumaSites := configSites(cfg)
+	mu.RUnlock()
+	var kumaPushes []kumaPush
+	// Snapshot push data here; delivery runs independently of the probe scheduler.
 	// 1. 推送整体状态
-	if cfg.Kuma.BaseURL != "" && cfg.Kuma.Slug != "" {
+	if kuma.BaseURL != "" && kuma.Slug != "" {
 		avgPing := 0
 		if latCount > 0 {
 			avgPing = totalLat / latCount
 		}
-		pingKuma(cfg.Kuma.Slug, overallStatus != "down", avgPing)
+		kumaPushes = append(kumaPushes, kumaPush{slug: kuma.Slug, up: overallStatus != "down", ping: avgPing})
 	}
 	// 2. 推送每个子组的独立状态
-	if cfg.Kuma.BaseURL != "" {
-		for _, site := range configSites(cfg) {
+	if kuma.BaseURL != "" {
+		for _, site := range kumaSites {
 			for _, g := range site.Groups {
 				for _, sg := range g.SubGroups {
 					if sg.KumaSlug != "" {
@@ -2208,12 +2166,14 @@ func refresh(only map[string]bool) bool {
 						if sgLatCount > 0 {
 							sgAvgPing = sgLatSum / sgLatCount
 						}
-						pingKuma(sg.KumaSlug, sgUp, sgAvgPing)
+						kumaPushes = append(kumaPushes, kumaPush{slug: sg.KumaSlug, up: sgUp, ping: sgAvgPing})
 					}
 				}
 			}
 		}
 	}
+
+	queueKumaPushes(kuma.BaseURL, kumaPushes)
 
 	mu.RLock()
 	tg := cfg.Telegram
@@ -2889,26 +2849,6 @@ func sendTelegramPhoto(token, chatID string, png []byte, caption string, markup 
 		msg = msg[:200]
 	}
 	return errors.New(msg)
-}
-
-func pingKuma(slug string, up bool, pingMs int) {
-	if slug == "" {
-		return
-	}
-	url := strings.TrimSuffix(cfg.Kuma.BaseURL, "/") + "/api/push/" + slug
-	statusStr := "down"
-	if up {
-		statusStr = "up"
-	}
-	pingParam := ""
-	if pingMs > 0 {
-		pingParam = fmt.Sprintf("%d", pingMs)
-	}
-	resp, err := http.Get(url + "?status=" + statusStr + "&msg=ok&ping=" + pingParam)
-	if err != nil {
-		return
-	}
-	resp.Body.Close()
 }
 
 // Kuma 公开状态页兼容结构

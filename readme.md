@@ -263,6 +263,14 @@ Cooldown duration is set via `manualRefreshCooldown` (default 60 seconds). Set `
 
 ## Uptime Kuma Integration
 
+### Probe and notification resource limits
+
+Probes reuse a connection pool with a 30-second idle timeout. Each round uses at most 8 workers. All probe requests, including retries, share limits of 8 concurrent requests globally and 2 per upstream host. Queueing does not consume the configured model request timeout, so a round may take longer when many models are configured.
+
+Text responses are limited to 1 MiB and image responses to 32 MiB. Oversized responses report an explicit error instead of parsing truncated JSON as an empty reply.
+
+Kuma pushes run in a separate background queue and do not block subsequent probe rounds. Requests have a 5-second timeout and each batch has a 20-second budget. Only the latest pending snapshot is retained. During a prolonged Kuma outage, obsolete pushes may be skipped; subsequent probe results resume delivery after recovery.
+
 Two push modes supported:
 
 1. **Global push**: Set `kuma.baseURL` and `kuma.slug` to push the average status of all models to one slug

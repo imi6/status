@@ -230,6 +230,87 @@ func TestCheckGoogleImageRequiresInlineImage(t *testing.T) {
 	}
 }
 
+func TestImageProbesAcceptLargeInlineResponses(t *testing.T) {
+	image := strings.Repeat("AAAA", 350000)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/images/generations") {
+			io.WriteString(w, `{"data":[{"b64_json":"`+image+`"}]}`)
+		} else {
+			io.WriteString(w, `{"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":"`+image+`"}}]}}]}`)
+		}
+	}))
+	defer srv.Close()
+	for _, provider := range []string{"openai-image", "google-image"} {
+		up, _, reason := checkOne(Model{ID: "image-test", Provider: provider, BaseURL: srv.URL, Timeout: 5})
+		if !up {
+			t.Errorf("%s rejected a valid large image: %s", provider, reason)
+		}
+	}
+}
+
+func TestRefreshContinuesWhileKumaIsUnresponsive(t *testing.T) {
+	oldCfg, oldStatus, oldPath, oldChecking := cfg, statusV2, configPath, checking
+	t.Cleanup(func() {
+		mu.Lock()
+		cfg, statusV2, configPath, checking = oldCfg, oldStatus, oldPath, oldChecking
+		mu.Unlock()
+	})
+	openCommunityDB(t)
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	kuma := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		entered <- struct{}{}
+		<-release
+		io.WriteString(w, `{"ok":true}`)
+	}))
+	defer kuma.Close()
+	defer close(release)
+	model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"choices":[{"message":{"content":"OK"}}]}`)
+	}))
+	defer model.Close()
+	configPath = filepath.Join(t.TempDir(), "config.json")
+	cfg = Config{
+		Frontend: FrontendConfig{Title: "Test"},
+		Kuma:     KumaConfig{BaseURL: kuma.URL, Slug: "test"},
+		Groups: []Group{{Name: "G", SubGroups: []SubGroup{{Name: "S", Models: []Model{{
+			ID: "test", Provider: "openai-compat", BaseURL: model.URL, Timeout: 2,
+		}}}}}},
+	}
+	if err := writeConfigFile(cfg); err != nil {
+		t.Fatal(err)
+	}
+	statusV2 = StatusRespV2{}
+	checking = false
+	for round := 0; round < 2; round++ {
+		done := make(chan bool, 1)
+		go func() { done <- refresh(nil) }()
+		if round == 0 {
+			select {
+			case <-entered:
+			case <-time.After(2 * time.Second):
+				t.Fatal("Kuma push was not started")
+			}
+		}
+		select {
+		case ok := <-done:
+			if !ok {
+				t.Fatal("refresh was skipped")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("refresh waited for the unresponsive notification service")
+		}
+	}
+	var checks int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM checks WHERE model_id = 'test' AND up = 1`).Scan(&checks); err != nil {
+		t.Fatal(err)
+	}
+	if checks != 2 {
+		t.Fatalf("completed probes = %d, want 2", checks)
+	}
+}
+
 func TestClassifyProbeStatus(t *testing.T) {
 	old := db
 	opened, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "checks.db"))
