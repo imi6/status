@@ -309,8 +309,11 @@ function periodStats(buckets){
 }
 function timelineHtml(buckets){
   return (buckets||[]).map(b=>{
-    return '<span class="seg '+barClass(b)+'" data-start="'+(b.start||0)+'" data-end="'+(b.end||0)+'" data-samples="'+(b.samples||0)+'" data-up="'+(b.up||0)+'" data-rate="'+(Number(b.success_rate)||0)+'" data-l="'+(b.avg_latency_ms||0)+'"></span>';
+    return '<span class="seg '+barClass(b)+'" data-start="'+(b.start||0)+'" data-end="'+(b.end||0)+'" data-samples="'+(b.samples||0)+'" data-up="'+(b.up||0)+'" data-rate="'+(Number(b.success_rate)||0)+'" data-l="'+(b.avg_latency_ms||0)+'" data-reason="'+attr(b.reason||'')+'"></span>';
   }).join('');
+}
+function attr(s){
+  return String(s||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
 }
 function segTipText(el){
   const samples=Number(el.dataset.samples)||0;
@@ -321,8 +324,9 @@ function segTipText(el){
   const rate=Number(el.dataset.rate)||0;
   const lat=Number(el.dataset.l)||0;
   const delay=lat?(lat/1000).toFixed(2)+'s':'无延迟';
+  const reason=el.dataset.reason||'';
   if(start===end){
-    return '<b>'+fmtTimeFull(start*1000)+'</b><div>本次检测 '+(up?'成功':'失败')+'</div><div>延迟 '+delay+'</div>';
+    return '<b>'+fmtTimeFull(start*1000)+'</b><div>本次检测 '+(up?'成功':'失败')+'</div>'+(reason&&!up?'<div>'+escapeHtml(reason)+'</div>':'')+'<div>延迟 '+delay+'</div>';
   }
   return '<b>'+fmtTimeFull(start*1000)+' – '+fmtTimeFull(end*1000)+'</b><div>成功率 '+rate.toFixed(1)+'%</div><div>采样 '+up+'/'+samples+'</div><div>平均延迟 '+delay+'</div>';
 }

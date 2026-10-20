@@ -139,11 +139,11 @@ func TestCheckOpenAICompatRequiresModelText(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	up, _ := checkOpenAICompat(Model{ID: "GPT-PRO", BaseURL: srv.URL + "/v1", Key: "sk", Timeout: 5, Provider: "openai-compat"})
+	up, _, _ := checkOpenAICompat(Model{ID: "GPT-PRO", BaseURL: srv.URL + "/v1", Key: "sk", Timeout: 5, Provider: "openai-compat"})
 	if !up {
 		t.Fatal("model text should be up")
 	}
-	up, _ = checkOpenAICompat(Model{ID: "GPT-PRO", BaseURL: srv.URL + "/empty", Key: "sk", Timeout: 5, Provider: "openai-compat"})
+	up, _, _ = checkOpenAICompat(Model{ID: "GPT-PRO", BaseURL: srv.URL + "/empty", Key: "sk", Timeout: 5, Provider: "openai-compat"})
 	if up {
 		t.Fatal("HTTP 200 without model text should be down")
 	}
@@ -175,15 +175,15 @@ func TestCheckOpenAIImageRequiresImage(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	up, _ := checkOpenAIImage(Model{ID: "flux", BaseURL: srv.URL, Key: "sk", Timeout: 5, Provider: "openai-image"})
+	up, _, _ := checkOpenAIImage(Model{ID: "flux", BaseURL: srv.URL, Key: "sk", Timeout: 5, Provider: "openai-image"})
 	if !up || gotPath != "/v1/images/generations" || gotModel != "flux" || gotPrompt != "red square" || gotN != 1 || gotSize != "1024x1024" {
 		t.Fatalf("up %v path %s model %s prompt %s n %d size %s", up, gotPath, gotModel, gotPrompt, gotN, gotSize)
 	}
-	up, _ = checkOne(Model{ID: "gpt-image-2", BaseURL: srv.URL, Key: "sk", Timeout: 5, Provider: "openai-compat"})
+	up, _, _ = checkOne(Model{ID: "gpt-image-2", BaseURL: srv.URL, Key: "sk", Timeout: 5, Provider: "openai-compat"})
 	if !up || gotModel != "gpt-image-2" || gotPath != "/v1/images/generations" {
 		t.Fatalf("compat image model up %v path %s model %s", up, gotPath, gotModel)
 	}
-	up, _ = checkOne(Model{ID: "flux", BaseURL: srv.URL + "/empty", Key: "sk", Timeout: 5, Provider: "openai-image"})
+	up, _, _ = checkOne(Model{ID: "flux", BaseURL: srv.URL + "/empty", Key: "sk", Timeout: 5, Provider: "openai-image"})
 	if up {
 		t.Fatal("HTTP 200 without image should be down")
 	}
@@ -224,7 +224,7 @@ func TestCheckGoogleImageRequiresInlineImage(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	up, _ := checkGoogleImage(Model{ID: "gemini-2.5-flash-image", BaseURL: srv.URL, Key: "sk", Timeout: 5, Provider: "google-image"})
+	up, _, _ := checkGoogleImage(Model{ID: "gemini-2.5-flash-image", BaseURL: srv.URL, Key: "sk", Timeout: 5, Provider: "google-image"})
 	if !up || !strings.HasSuffix(gotPath, "/v1beta/models/gemini-2.5-flash-image:generateContent") || gotPrompt != "red square" || gotModalities != "TEXT,IMAGE" || gotRatio != "1:1" {
 		t.Fatalf("up %v path %s prompt %s modalities %s ratio %s", up, gotPath, gotPrompt, gotModalities, gotRatio)
 	}
@@ -449,4 +449,14 @@ func TestOverallFromRows(t *testing.T) {
 	check("degraded", "降级", sec(row("degraded"), row("degraded"), row("degraded"), row("up"), row("up")))
 	check("degraded", "降级", sec(row("degraded")))
 	check("down", "部分异常", sec(row("up"), row("up"), row("up"), row("up"), row("down")))
+}
+
+func TestProbeFailReasonUsesAPIMessage(t *testing.T) {
+	got := probeFailReason(400, []byte(`{"error":{"message":"This model is not supported on the Chat Completions endpoint"}}`))
+	if !strings.Contains(got, "HTTP 400") || !strings.Contains(got, "not supported") {
+		t.Fatal(got)
+	}
+	if probeFailReason(200, []byte(`{"choices":[]}`)) != "接口成功但没有返回内容" {
+		t.Fatal(probeFailReason(200, []byte(`{"choices":[]}`)))
+	}
 }

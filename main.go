@@ -50,10 +50,10 @@ type Config struct {
 }
 
 type TelegramConfig struct {
-	BotToken  string   `json:"botToken"`
-	ChatID    string   `json:"chatID"`
-	ChatIDs   []string `json:"chatIDs,omitempty"`
-	Interval  int      `json:"interval"`  // 群推送间隔（分钟）。0 表示状态一变化就推送
+	BotToken      string           `json:"botToken"`
+	ChatID        string           `json:"chatID"`
+	ChatIDs       []string         `json:"chatIDs,omitempty"`
+	Interval      int              `json:"interval"`  // 群推送间隔（分钟）。0 表示状态一变化就推送
 	StatusURL     string           `json:"statusURL"` // 旧版底部监控地址；未配置按钮时仍用来生成默认按钮
 	Website       string           `json:"website"`   // 旧版底部官网
 	Channel       string           `json:"channel"`   // 旧版底部通知频道
@@ -131,6 +131,7 @@ type TimelineBucket struct {
 	Up      int     `json:"up"`
 	Rate    float64 `json:"success_rate"`
 	Latency int     `json:"avg_latency_ms"`
+	Reason  string  `json:"reason,omitempty"`
 }
 
 // 按外层group.name分组，返回分组列表和该分组下的所有行
@@ -383,7 +384,19 @@ func ensureSchema() error {
 	if err := ensureSiteInterval(); err != nil {
 		return err
 	}
+	if err := ensureCheckReason(); err != nil {
+		return err
+	}
 	return ensureCommunityTables()
+}
+
+func ensureCheckReason() error {
+	has, err := columnExists("checks", "reason")
+	if err != nil || has {
+		return err
+	}
+	_, err = db.Exec(`ALTER TABLE checks ADD COLUMN reason TEXT NOT NULL DEFAULT ''`)
+	return err
 }
 
 func ensureSiteInterval() error {
@@ -601,9 +614,9 @@ func loadMonitorSubgroups(groupID int) ([]SubGroup, error) {
 		return nil, err
 	}
 	type subRow struct {
-		id          int
-		name, slug  string
-		ratio       string
+		id         int
+		name, slug string
+		ratio      string
 	}
 	var list []subRow
 	for rows.Next() {
@@ -763,14 +776,16 @@ func migrateGroups() {
 	mu.Unlock()
 }
 
-func saveCheck(siteName, groupName, subName, modelID string, up bool, latency int) {
+func saveCheck(siteName, groupName, subName, modelID string, up bool, latency int, reason string) {
 	v := 0
 	if up {
 		v = 1
+		reason = ""
 	}
+	reason = clipText(reason, 160)
 	_, err := db.Exec(
-		"INSERT INTO checks (site_name, group_name, sub_name, model_id, up, latency, checked_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		siteName, groupName, subName, modelID, v, latency, time.Now().Unix(),
+		"INSERT INTO checks (site_name, group_name, sub_name, model_id, up, latency, checked_at, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		siteName, groupName, subName, modelID, v, latency, time.Now().Unix(), reason,
 	)
 	if err != nil {
 		log.Println("db insert error:", err)
@@ -816,9 +831,10 @@ func getHistory(siteName, groupName, subName, modelID string, limit int) []Histo
 }
 
 type probePoint struct {
-	up  bool
-	lat int
-	ts  int64
+	up     bool
+	lat    int
+	ts     int64
+	reason string
 }
 
 func loadProbePoints(siteName, groupName, subName, modelID string, since int64) []probePoint {
@@ -826,7 +842,7 @@ func loadProbePoints(siteName, groupName, subName, modelID string, since int64) 
 		return nil
 	}
 	rows, err := db.Query(
-		`SELECT up, latency, checked_at FROM checks WHERE site_name = ? AND group_name = ? AND sub_name = ? AND model_id = ? AND checked_at >= ? ORDER BY checked_at`,
+		`SELECT up, latency, checked_at, reason FROM checks WHERE site_name = ? AND group_name = ? AND sub_name = ? AND model_id = ? AND checked_at >= ? ORDER BY checked_at`,
 		siteName, groupName, subName, modelID, since,
 	)
 	if err != nil {
@@ -837,10 +853,11 @@ func loadProbePoints(siteName, groupName, subName, modelID string, since int64) 
 	for rows.Next() {
 		var up, lat int
 		var ts int64
-		if rows.Scan(&up, &lat, &ts) != nil {
+		var reason string
+		if rows.Scan(&up, &lat, &ts, &reason) != nil {
 			continue
 		}
-		points = append(points, probePoint{up: up == 1, lat: lat, ts: ts})
+		points = append(points, probePoint{up: up == 1, lat: lat, ts: ts, reason: reason})
 	}
 	return points
 }
@@ -893,6 +910,7 @@ func probeBuckets(now time.Time, points []probePoint) []TimelineBucket {
 			Up:      up,
 			Rate:    rate,
 			Latency: p.lat,
+			Reason:  p.reason,
 		})
 	}
 	return out
@@ -1172,23 +1190,23 @@ func probeBody(provider, modelID string) ([]byte, error) {
 	}
 }
 
-func checkOpenAICompat(m Model) (bool, int) {
+func checkOpenAICompat(m Model) (bool, int, string) {
 	base, ok := readyBase(m)
 	if !ok {
-		return false, 0
+		return false, 0, "接口地址不正确"
 	}
 	body, err := probeBody("openai-compat", m.ID)
 	if err != nil {
-		return false, 0
+		return false, 0, "探测请求无法生成"
 	}
-	code, resp, lat := doPost(base+"/chat/completions", m.Key, body, m.Timeout)
-	return code > 0 && code < 300 && openaiCompatHasReply(resp), lat
+	code, resp, lat, netErr := doPost(base+"/chat/completions", m.Key, body, m.Timeout)
+	return finishProbe(code, resp, lat, netErr, openaiCompatHasReply(resp))
 }
 
-func checkOpenAIImage(m Model) (bool, int) {
+func checkOpenAIImage(m Model) (bool, int, string) {
 	base, ok := readyBase(m)
 	if !ok {
-		return false, 0
+		return false, 0, "接口地址不正确"
 	}
 	body, err := json.Marshal(map[string]any{
 		"model":  m.ID,
@@ -1197,10 +1215,10 @@ func checkOpenAIImage(m Model) (bool, int) {
 		"size":   "1024x1024",
 	})
 	if err != nil {
-		return false, 0
+		return false, 0, "探测请求无法生成"
 	}
-	code, resp, lat := doPost(base+"/images/generations", m.Key, body, m.Timeout)
-	return code > 0 && code < 300 && imageHasResult(resp), lat
+	code, resp, lat, netErr := doPost(base+"/images/generations", m.Key, body, m.Timeout)
+	return finishProbe(code, resp, lat, netErr, imageHasResult(resp))
 }
 
 func imageHasResult(raw []byte) bool {
@@ -1222,37 +1240,37 @@ func imageHasResult(raw []byte) bool {
 	return false
 }
 
-func checkOpenAIResponse(m Model) (bool, int) {
+func checkOpenAIResponse(m Model) (bool, int, string) {
 	base, ok := readyBase(m)
 	if !ok {
-		return false, 0
+		return false, 0, "接口地址不正确"
 	}
 	body, err := probeBody("openai-response", m.ID)
 	if err != nil {
-		return false, 0
+		return false, 0, "探测请求无法生成"
 	}
-	code, resp, lat := doPost(base+"/responses", m.Key, body, m.Timeout)
-	return code > 0 && code < 300 && openaiResponseHasReply(resp), lat
+	code, resp, lat, netErr := doPost(base+"/responses", m.Key, body, m.Timeout)
+	return finishProbe(code, resp, lat, netErr, openaiResponseHasReply(resp))
 }
 
-func checkGoogle(m Model) (bool, int) {
+func checkGoogle(m Model) (bool, int, string) {
 	base, ok := readyBase(m)
 	if !ok {
-		return false, 0
+		return false, 0, "接口地址不正确"
 	}
 	url := fmt.Sprintf("%s/models/%s:generateContent?key=%s", base, m.ID, m.Key)
 	body, err := probeBody("google", m.ID)
 	if err != nil {
-		return false, 0
+		return false, 0, "探测请求无法生成"
 	}
-	code, resp, lat := doPost(url, "", body, m.Timeout)
-	return code > 0 && code < 300 && googleHasReply(resp), lat
+	code, resp, lat, netErr := doPost(url, "", body, m.Timeout)
+	return finishProbe(code, resp, lat, netErr, googleHasReply(resp))
 }
 
-func checkGoogleImage(m Model) (bool, int) {
+func checkGoogleImage(m Model) (bool, int, string) {
 	base, ok := readyBase(m)
 	if !ok {
-		return false, 0
+		return false, 0, "接口地址不正确"
 	}
 	body, err := json.Marshal(map[string]any{
 		"contents": []map[string]any{{
@@ -1269,20 +1287,20 @@ func checkGoogleImage(m Model) (bool, int) {
 		},
 	})
 	if err != nil {
-		return false, 0
+		return false, 0, "探测请求无法生成"
 	}
 	endpoint := fmt.Sprintf("%s/models/%s:generateContent", base, m.ID)
 	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return false, 0
+		return false, 0, "探测请求无法生成"
 	}
 	req.Header.Set("content-type", "application/json")
 	if m.Key != "" {
 		req.Header.Set("authorization", "Bearer "+m.Key)
 		req.Header.Set("x-goog-api-key", m.Key)
 	}
-	code, resp, lat := doReq(req, m.Timeout)
-	return code > 0 && code < 300 && googleHasImage(resp), lat
+	code, resp, lat, netErr := doReq(req, m.Timeout)
+	return finishProbe(code, resp, lat, netErr, googleHasImage(resp))
 }
 
 func readyBase(m Model) (string, bool) {
@@ -1290,30 +1308,30 @@ func readyBase(m Model) (string, bool) {
 	return base, err == nil
 }
 
-func checkAnthropic(m Model) (bool, int) {
+func checkAnthropic(m Model) (bool, int, string) {
 	base, ok := readyBase(m)
 	if !ok {
-		return false, 0
+		return false, 0, "接口地址不正确"
 	}
 	body, err := probeBody("anthropic", m.ID)
 	if err != nil {
-		return false, 0
+		return false, 0, "探测请求无法生成"
 	}
 	req, err := http.NewRequest("POST", base+"/messages", bytes.NewReader(body))
 	if err != nil {
-		return false, 0
+		return false, 0, "探测请求无法生成"
 	}
 	req.Header.Set("x-api-key", m.Key)
 	req.Header.Set("anthropic-version", "2023-06-01")
 	req.Header.Set("content-type", "application/json")
-	code, resp, lat := doReq(req, m.Timeout)
-	return code > 0 && code < 300 && anthropicHasReply(resp), lat
+	code, resp, lat, netErr := doReq(req, m.Timeout)
+	return finishProbe(code, resp, lat, netErr, anthropicHasReply(resp))
 }
 
-func doPost(url, key string, body []byte, timeout int) (int, []byte, int) {
+func doPost(url, key string, body []byte, timeout int) (int, []byte, int, string) {
 	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
 	if err != nil {
-		return 0, nil, 0
+		return 0, nil, 0, "探测请求无法生成"
 	}
 	req.Header.Set("content-type", "application/json")
 	if key != "" {
@@ -1322,7 +1340,7 @@ func doPost(url, key string, body []byte, timeout int) (int, []byte, int) {
 	return doReq(req, timeout)
 }
 
-func doReq(req *http.Request, timeout int) (int, []byte, int) {
+func doReq(req *http.Request, timeout int) (int, []byte, int, string) {
 	if timeout == 0 {
 		timeout = 30
 	}
@@ -1336,14 +1354,101 @@ func doReq(req *http.Request, timeout int) (int, []byte, int) {
 	resp, err := client.Do(req)
 	lat := int(time.Since(start).Milliseconds())
 	if err != nil {
-		return 0, nil, lat
+		return 0, nil, lat, shortNetErr(err)
 	}
 	defer resp.Body.Close()
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return 0, nil, lat
+		return resp.StatusCode, nil, lat, "读取响应失败"
 	}
-	return resp.StatusCode, b, lat
+	return resp.StatusCode, b, lat, ""
+}
+
+func finishProbe(code int, body []byte, lat int, netErr string, ok bool) (bool, int, string) {
+	if netErr != "" {
+		return false, lat, netErr
+	}
+	if code > 0 && code < 300 && ok {
+		return true, lat, ""
+	}
+	return false, lat, probeFailReason(code, body)
+}
+
+func probeFailReason(code int, body []byte) string {
+	if msg := apiErrorMessage(body); msg != "" {
+		if code > 0 {
+			return clipText(fmt.Sprintf("HTTP %d %s", code, msg), 120)
+		}
+		return clipText(msg, 120)
+	}
+	if code <= 0 {
+		return "连接失败"
+	}
+	if code >= 300 {
+		return fmt.Sprintf("HTTP %d", code)
+	}
+	return "接口成功但没有返回内容"
+}
+
+func apiErrorMessage(raw []byte) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var v struct {
+		Error   json.RawMessage `json:"error"`
+		Message string          `json:"message"`
+		Msg     string          `json:"msg"`
+	}
+	if json.Unmarshal(raw, &v) != nil {
+		return ""
+	}
+	if s := strings.TrimSpace(v.Message); s != "" {
+		return s
+	}
+	if s := strings.TrimSpace(v.Msg); s != "" {
+		return s
+	}
+	if len(v.Error) == 0 || string(v.Error) == "null" {
+		return ""
+	}
+	var text string
+	if json.Unmarshal(v.Error, &text) == nil {
+		return strings.TrimSpace(text)
+	}
+	var obj struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(v.Error, &obj) == nil {
+		return strings.TrimSpace(obj.Message)
+	}
+	return ""
+}
+
+func shortNetErr(err error) string {
+	s := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(s, "timeout"), strings.Contains(s, "deadline"):
+		return "请求超时"
+	case strings.Contains(s, "connection refused"):
+		return "连接被拒绝"
+	case strings.Contains(s, "no such host"):
+		return "域名无法解析"
+	case strings.Contains(s, "connection reset"):
+		return "连接被重置"
+	case strings.Contains(s, "tls"), strings.Contains(s, "certificate"):
+		return "证书校验失败"
+	default:
+		return "网络错误"
+	}
+}
+
+func clipText(s string, n int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }
 
 func hasAPIError(raw json.RawMessage) bool {
@@ -1549,7 +1654,7 @@ func probeProvider(m Model) string {
 	return m.Provider
 }
 
-func checkOne(m Model) (bool, int) {
+func checkOne(m Model) (bool, int, string) {
 	switch probeProvider(m) {
 	case "openai-compat":
 		return checkOpenAICompat(m)
@@ -1952,9 +2057,12 @@ func runProbes(targets []probeTarget, sections *[]Section, saveFailure bool) (fa
 	for _, target := range targets {
 		go func(target probeTarget) {
 			defer wg.Done()
-			up, lat := checkOne(target.m)
+			up, lat, reason := checkOne(target.m)
 			if up || saveFailure {
-				saveCheck(target.site, target.gName, target.sgName, target.m.ID, up, lat)
+				saveCheck(target.site, target.gName, target.sgName, target.m.ID, up, lat, reason)
+			}
+			if !up && saveFailure && reason != "" {
+				log.Printf("probe %s/%s: %s", target.gName, target.m.ID, reason)
 			}
 			if up {
 				resultMu.Lock()
@@ -2070,38 +2178,38 @@ func refresh(only map[string]bool) bool {
 		for _, site := range configSites(cfg) {
 			for _, g := range site.Groups {
 				for _, sg := range g.SubGroups {
-				if sg.KumaSlug != "" {
-					var sgLatSum, sgLatCount int
-					sgUp := len(sg.Models) > 0
-					for _, m := range sg.Models {
-						found := false
-						for _, sec := range sections {
-							if sec.Site != site.Name || sec.Name != g.Name {
-								continue
-							}
-							for _, r := range sec.Rows {
-								if r.SubName == sg.Name && r.Name == m.ID {
-									found = true
-									if r.Status == "down" {
-										sgUp = false
+					if sg.KumaSlug != "" {
+						var sgLatSum, sgLatCount int
+						sgUp := len(sg.Models) > 0
+						for _, m := range sg.Models {
+							found := false
+							for _, sec := range sections {
+								if sec.Site != site.Name || sec.Name != g.Name {
+									continue
+								}
+								for _, r := range sec.Rows {
+									if r.SubName == sg.Name && r.Name == m.ID {
+										found = true
+										if r.Status == "down" {
+											sgUp = false
+										}
 									}
 								}
 							}
+							if !found {
+								sgUp = false
+							}
+							if _, lat, at := getLastCheck(site.Name, g.Name, sg.Name, m.ID); !at.IsZero() {
+								sgLatSum += lat
+								sgLatCount++
+							}
 						}
-						if !found {
-							sgUp = false
+						sgAvgPing := 0
+						if sgLatCount > 0 {
+							sgAvgPing = sgLatSum / sgLatCount
 						}
-						if _, lat, at := getLastCheck(site.Name, g.Name, sg.Name, m.ID); !at.IsZero() {
-							sgLatSum += lat
-							sgLatCount++
-						}
+						pingKuma(sg.KumaSlug, sgUp, sgAvgPing)
 					}
-					sgAvgPing := 0
-					if sgLatCount > 0 {
-						sgAvgPing = sgLatSum / sgLatCount
-					}
-					pingKuma(sg.KumaSlug, sgUp, sgAvgPing)
-				}
 				}
 			}
 		}
@@ -2130,6 +2238,7 @@ func refresh(only map[string]bool) bool {
 	} else if text, reason := takeTelegram(prevRows, prevOverall, sections, overallStatus, overallLabel, tgEvery, nowPush); text == "" {
 		noteTelegram(reason)
 	} else {
+		noteTelegram(text)
 		images, imgErr := renderStatusBoard(tgTitle, sections, nowPush)
 		if imgErr != nil {
 			noteTelegram("状态图生成失败，改为文字：" + imgErr.Error())
@@ -2322,7 +2431,7 @@ func takeTelegram(prev map[string]string, prevOverall string, sections []Section
 		if mins < 1 {
 			mins = 1
 		}
-		return "", fmt.Sprintf("有变化但未到推送间隔，约 %d 分钟后再发", mins)
+		return "", fmt.Sprintf("有变化但未到推送间隔，约 %d 分钟后再发：%s", mins, telegramChangeSummary(tgQueue.items))
 	}
 	pending := make([]tgItem, 0, len(tgQueue.items))
 	for _, it := range tgQueue.items {
@@ -2333,6 +2442,22 @@ func takeTelegram(prev map[string]string, prevOverall string, sections []Section
 	tgQueue.overallFrom, tgQueue.overallTo, tgQueue.label = "", "", ""
 	tgQueue.last = now
 	return text, ""
+}
+
+func telegramChangeSummary(items map[string]tgItem) string {
+	if len(items) == 0 {
+		return "无模型条目"
+	}
+	names := make([]string, 0, len(items))
+	for _, it := range items {
+		names = append(names, it.model+" "+statusWord(it.from)+"→"+statusWord(it.to))
+	}
+	sort.Strings(names)
+	if len(names) > 8 {
+		extra := len(names) - 8
+		names = append(names[:8], fmt.Sprintf("另有 %d 个", extra))
+	}
+	return strings.Join(names, "，")
 }
 
 func formatStatusBoard(title string, sections []Section, now time.Time) string {

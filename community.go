@@ -1107,7 +1107,21 @@ func notifyUser(userID int64, text string) error {
 	return communitySend(token, strconv.FormatInt(userID, 10), text, nil)
 }
 
-var communityClient = &http.Client{Timeout: 40 * time.Second}
+var communityClient = &http.Client{Timeout: 70 * time.Second}
+
+func redactTelegramErr(err error) string {
+	if err == nil {
+		return ""
+	}
+	s := err.Error()
+	if i := strings.Index(s, "/bot"); i >= 0 {
+		rest := s[i+4:]
+		if j := strings.Index(rest, "/"); j >= 0 {
+			s = s[:i+4] + "***" + rest[j:]
+		}
+	}
+	return s
+}
 
 func startCommunity() {
 	go communityPollLoop()
@@ -1131,7 +1145,7 @@ func communityPollLoop() {
 			continue
 		}
 		if err := pollCommunityOnce(); err != nil {
-			log.Println("community poll:", err)
+			log.Println("community poll:", redactTelegramErr(err))
 			time.Sleep(5 * time.Second)
 		}
 	}
