@@ -19,8 +19,16 @@ func joinSpeech(msg communityMessage, now time.Time) (string, string) {
 		return "报名失败，请稍后再试。", ""
 	}
 	day := speechDay(now)
-	return fmt.Sprintf("%s 已报名，当前共 %d 人报名。今天 %d/%d 句，今日奖池 %d 人。每天满 %d 句进入抽奖池，次日随机抽 %d 人私信发奖。请先私聊机器人 /start。",
-		msg.displayName(), memberCount(), speechCount(msg.UserID, day), conf.SpeechNeed, poolSize(day, conf), conf.SpeechNeed, conf.Winners), ""
+	return fmt.Sprintf("%s 已报名，当前共 %d 人报名。今天 %d/%d 句，今日奖池 %d 人。每天满 %d 句进入抽奖池，次日随机抽 %d 人私信发奖。%s请先私聊机器人 /start。",
+		msg.displayName(), memberCount(), speechCount(msg.UserID, day), conf.SpeechNeed, poolSize(day, conf), conf.SpeechNeed, conf.Winners, minPoolText(conf)), ""
+}
+
+// minPoolText is empty when any pool size draws, so the default reads as before.
+func minPoolText(conf CommunityConfig) string {
+	if conf.MinPool <= 1 {
+		return ""
+	}
+	return fmt.Sprintf("奖池满 %d 人才开奖，不满则当天不开奖。", conf.MinPool)
 }
 
 func memberCount() int {
@@ -38,7 +46,7 @@ func poolSize(day string, conf CommunityConfig) int {
 func poolReply(msg communityMessage, now time.Time) string {
 	conf := loadCommunityConfig()
 	day := speechDay(now)
-	lines := []string{fmt.Sprintf("当前报名 %d 人，今日奖池 %d 人，次日抽 %d 人。", memberCount(), poolSize(day, conf), conf.Winners)}
+	lines := []string{fmt.Sprintf("当前报名 %d 人，今日奖池 %d 人，次日抽 %d 人。%s", memberCount(), poolSize(day, conf), conf.Winners, minPoolText(conf))}
 	if speechMember(msg.UserID) {
 		lines = append(lines, fmt.Sprintf("%s 今天 %d/%d 句。", msg.displayName(), speechCount(msg.UserID, day), conf.SpeechNeed))
 	} else {
@@ -91,6 +99,11 @@ func settleSpeechDay(day string, now time.Time) {
 	rows.Close()
 	if len(pool) == 0 {
 		_, _ = db.Exec(`INSERT INTO daily_settle (day, participants, rewarded, settled_at) VALUES (?, 0, 0, ?)`, day, now.Unix())
+		return
+	}
+	if len(pool) < conf.MinPool {
+		_, _ = db.Exec(`INSERT INTO daily_settle (day, participants, rewarded, settled_at) VALUES (?, ?, 0, ?)`, day, len(pool), now.Unix())
+		notifyGroup(fmt.Sprintf("%s 奖池 %d 人，未满 %d 人，今日不开奖。", day, len(pool), conf.MinPool))
 		return
 	}
 	want := min(conf.Winners, len(pool))

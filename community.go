@@ -26,13 +26,14 @@ type CommunityConfig struct {
 	MinPoints  int    `json:"minPoints"`
 	SpeechNeed int    `json:"speechNeed"`
 	Winners    int    `json:"winners"`
+	MinPool    int    `json:"minPool"`
 	CleanLines bool   `json:"cleanLines"`
 }
 
 func defaultCommunityConfig() CommunityConfig {
 	return CommunityConfig{
 		RatePoints: 10, RateYuan: "1", RateCents: 100, MinPoints: 10,
-		SpeechNeed: 5, Winners: 1, CleanLines: true,
+		SpeechNeed: 5, Winners: 1, MinPool: 100, CleanLines: true,
 	}
 }
 
@@ -140,6 +141,9 @@ func loadCommunityConfig() CommunityConfig {
 	if cfg.Winners <= 0 {
 		cfg.Winners = def.Winners
 	}
+	if cfg.MinPool <= 0 {
+		cfg.MinPool = def.MinPool
+	}
 	return cfg
 }
 
@@ -165,6 +169,9 @@ func saveCommunityConfig(c CommunityConfig) error {
 	}
 	if c.Winners < 1 || c.Winners > 1000 {
 		return errors.New("每天中奖人数需在 1 到 1000")
+	}
+	if c.MinPool < 1 || c.MinPool > 100000 {
+		return errors.New("最少奖池人数需在 1 到 100000")
 	}
 	c.ChatID = strings.TrimSpace(c.ChatID)
 	raw, err := json.Marshal(c)
@@ -276,7 +283,7 @@ func communityHelp() string {
 	conf := loadCommunityConfig()
 	return strings.Join([]string{
 		"每日抽奖要先 /join，没报名的发言不计数。报名一次长期有效。",
-		fmt.Sprintf("每天发言满 %d 句进入当天抽奖池，次日随机抽 %d 人，私信发奖。", conf.SpeechNeed, conf.Winners),
+		fmt.Sprintf("每天发言满 %d 句进入当天抽奖池，次日随机抽 %d 人，私信发奖。", conf.SpeechNeed, conf.Winners) + minPoolText(conf),
 		"请先私聊机器人 /start，否则兑换码发不出去。",
 		"/join   报名参加",
 		"/leave   退出，之后不再计数",
@@ -867,6 +874,7 @@ type speechDash struct {
 	Messages  int       `json:"messages"`
 	Need      int       `json:"need"`
 	Winners   int       `json:"winners"`
+	MinPool   int       `json:"minPool"`
 	Days      []dashDay `json:"days"`
 }
 
@@ -875,7 +883,7 @@ func speechDashboard(now time.Time) speechDash {
 	today := speechToday(now)
 	out := speechDash{
 		Members: today.Members, Speakers: today.Speakers, Qualified: today.Qualified,
-		Need: conf.SpeechNeed, Winners: conf.Winners,
+		Need: conf.SpeechNeed, Winners: conf.Winners, MinPool: conf.MinPool,
 		Days: []dashDay{},
 	}
 	day := speechDay(now)

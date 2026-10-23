@@ -282,13 +282,14 @@ table.grid-table tbody tr.active{background:var(--panel-2)}
     </section>
     <section class="card">
       <h2>群活动</h2>
-      <p class="hint">用户发送 /join 报名，报名长期有效。报名后当天发言满指定句数（重复内容不计）即进入当天抽奖池，次日 0 点后从奖池随机抽取中奖人，私信发放下方奖品库里的 CDK，群里只公布中奖人和奖品名。</p>
+      <p class="hint">用户发送 /join 报名，报名长期有效。报名后当天发言满指定句数（重复内容不计）即进入当天抽奖池，次日 0 点后从奖池随机抽取中奖人，私信发放下方奖品库里的 CDK，群里只公布中奖人和奖品名。奖池人数不满“最少奖池人数”时当天不开奖，填 1 表示有人就开奖。</p>
       <form id="communityForm">
         <div class="grid">
           <label class="check"><input name="enabled" type="checkbox">开启群活动</label>
           <label>活动群 ID<input name="chatID" spellcheck="false" placeholder="留空则用第一个推送群"></label>
           <label>每日发言句数<input name="speechNeed" type="number" min="1" max="1000" value="5"></label>
           <label>每天中奖人数<input name="winners" type="number" min="1" max="1000" value="1"></label>
+          <label>最少奖池人数<input name="minPool" type="number" min="1" max="100000" value="100" title="奖池不满这个人数，当天不开奖。填 1 表示有人就开奖"></label>
           <label class="check"><input name="cleanLines" type="checkbox" checked>自动清理 48 小时前的聊天和发言次数</label>
           <label>多少积分<input name="ratePoints" type="number" min="1" max="10000" value="10"></label>
           <label>等于多少元额度<input name="rateYuan" inputmode="decimal" value="1" placeholder="1"></label>
@@ -1106,7 +1107,8 @@ function renderSpeechDash(dash){
     [dash.speakers || 0, '今日发言人数'],
     [dash.messages || 0, '今日条数'],
     [dash.qualified || 0, '今日奖池（满 ' + (dash.need || 5) + ' 句）'],
-    [dash.winners || 1, '每天中奖人数']
+    [dash.winners || 1, '每天中奖人数'],
+    [dash.minPool || 100, '最少奖池人数']
   ];
   const box = $('speechStats');
   box.replaceChildren();
@@ -1145,6 +1147,7 @@ async function loadCommunity(){
     f.chatID.value = cfg.chatID || '';
     f.speechNeed.value = cfg.speechNeed || 5;
     f.winners.value = cfg.winners || 1;
+    f.minPool.value = cfg.minPool || 100;
     f.cleanLines.checked = cfg.cleanLines !== false;
     $('lineCount').textContent = '聊天内容和每人发言次数只在后台记录，不在这里展示。当前保存 ' + (data.lineCount || 0) + ' 条。';
     renderPrizes(data.prizes || [], data.prizeLeft || 0);
@@ -1182,6 +1185,7 @@ $('communityForm').addEventListener('submit', async (e) => {
       chatID: f.chatID.value,
       speechNeed: Number(f.speechNeed.value || 5),
       winners: Number(f.winners.value || 1),
+      minPool: Number(f.minPool.value || 100),
       cleanLines: f.cleanLines.checked,
       ratePoints: Number(f.ratePoints.value || 10),
       rateYuan: String(f.rateYuan.value || '1').trim(),

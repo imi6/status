@@ -90,6 +90,7 @@ func TestDailyLotteryDrawsFromQualifiedPool(t *testing.T) {
 	conf.ChatID = "-1001"
 	conf.SpeechNeed = 2
 	conf.Winners = 1
+	conf.MinPool = 1
 	if err := saveCommunityConfig(conf); err != nil {
 		t.Fatal(err)
 	}
@@ -186,12 +187,69 @@ func TestDailyLotteryDrawsFromQualifiedPool(t *testing.T) {
 	}
 }
 
+func TestLotterySkipsSmallPool(t *testing.T) {
+	openCommunityDB(t)
+	conf := defaultCommunityConfig()
+	if conf.MinPool != 100 {
+		t.Fatalf("default min pool %d", conf.MinPool)
+	}
+	conf.Enabled = true
+	conf.ChatID = "-1001"
+	conf.SpeechNeed = 1
+	conf.MinPool = 2
+	if err := saveCommunityConfig(conf); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := importPrizes("1元", "CDK-ONE"); err != nil {
+		t.Fatal(err)
+	}
+	oldSend := communitySend
+	var sent []string
+	communitySend = func(token, chatID, text string, markup json.RawMessage) error {
+		sent = append(sent, chatID+" "+text)
+		return nil
+	}
+	t.Cleanup(func() { communitySend = oldSend })
+	oldCfg := cfg
+	cfg.Telegram.BotToken = "token"
+	t.Cleanup(func() { cfg = oldCfg })
+
+	day := time.Date(2026, 10, 17, 12, 0, 0, 0, shanghai)
+	ada := communityMessage{ChatID: -1001, UserID: 7, UserName: "ada", Text: "/join"}
+	if reply, _ := applyCommunity(ada, day); !strings.Contains(reply, "奖池满 2 人才开奖") {
+		t.Fatalf("join %q", reply)
+	}
+	ada.Text = "hi"
+	recordSpeech(ada, day)
+	settleDue(time.Date(2026, 10, 18, 0, 10, 0, 0, shanghai))
+	if prizeCount() != 1 {
+		t.Fatal("prize should stay when pool is too small")
+	}
+	var settled int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM daily_settle WHERE day = '2026-10-17'`).Scan(&settled)
+	if settled != 1 || len(sent) != 1 || !strings.Contains(sent[0], "未满 2 人") {
+		t.Fatalf("settled %d sent %#v", settled, sent)
+	}
+
+	day2 := day.Add(24 * time.Hour)
+	bob := communityMessage{ChatID: -1001, UserID: 8, UserName: "bob", Text: "/join"}
+	applyCommunity(bob, day2)
+	ada.Text, bob.Text = "a", "b"
+	recordSpeech(ada, day2)
+	recordSpeech(bob, day2)
+	settleDue(time.Date(2026, 10, 19, 0, 10, 0, 0, shanghai))
+	if prizeCount() != 0 {
+		t.Fatal("full pool should draw")
+	}
+}
+
 func TestLotteryWaitsForStock(t *testing.T) {
 	openCommunityDB(t)
 	conf := defaultCommunityConfig()
 	conf.Enabled = true
 	conf.ChatID = "-1001"
 	conf.SpeechNeed = 1
+	conf.MinPool = 1
 	if err := saveCommunityConfig(conf); err != nil {
 		t.Fatal(err)
 	}
