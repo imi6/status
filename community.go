@@ -18,22 +18,20 @@ import (
 var shanghai = time.FixedZone("UTC+8", 8*3600)
 
 type CommunityConfig struct {
-	Enabled     bool   `json:"enabled"`
-	ChatID      string `json:"chatID"`
-	RatePoints  int    `json:"ratePoints"`
-	RateYuan    string `json:"rateYuan"`
-	RateCents   int    `json:"rateCents"`
-	MinPoints   int    `json:"minPoints"`
-	SpeechNeed  int    `json:"speechNeed"`
-	SpeechYuan  string `json:"speechYuan"`
-	SpeechCents int    `json:"speechCents"`
-	MinSpeakers int    `json:"minSpeakers"`
+	Enabled    bool   `json:"enabled"`
+	ChatID     string `json:"chatID"`
+	RatePoints int    `json:"ratePoints"`
+	RateYuan   string `json:"rateYuan"`
+	RateCents  int    `json:"rateCents"`
+	MinPoints  int    `json:"minPoints"`
+	SpeechNeed int    `json:"speechNeed"`
+	Winners    int    `json:"winners"`
 }
 
 func defaultCommunityConfig() CommunityConfig {
 	return CommunityConfig{
 		RatePoints: 10, RateYuan: "1", RateCents: 100, MinPoints: 10,
-		SpeechNeed: 10, SpeechYuan: "1", SpeechCents: 100, MinSpeakers: 100,
+		SpeechNeed: 5, Winners: 1,
 	}
 }
 
@@ -88,6 +86,16 @@ func ensureCommunityTables() error {
 			body TEXT NOT NULL,
 			PRIMARY KEY (day, user_id, body)
 		);
+		CREATE TABLE IF NOT EXISTS lottery_prizes (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
+			code TEXT NOT NULL UNIQUE,
+			status TEXT NOT NULL DEFAULT 'available',
+			winner_id INTEGER NOT NULL DEFAULT 0,
+			winner_name TEXT NOT NULL DEFAULT '',
+			day TEXT NOT NULL DEFAULT '',
+			used_at INTEGER NOT NULL DEFAULT 0
+		);
 		CREATE TABLE IF NOT EXISTS daily_settle (
 			day TEXT PRIMARY KEY,
 			participants INTEGER NOT NULL,
@@ -128,17 +136,8 @@ func loadCommunityConfig() CommunityConfig {
 	if cfg.SpeechNeed <= 0 {
 		cfg.SpeechNeed = def.SpeechNeed
 	}
-	if cfg.MinSpeakers <= 0 {
-		cfg.MinSpeakers = def.MinSpeakers
-	}
-	if strings.TrimSpace(cfg.SpeechYuan) == "" {
-		if cfg.SpeechCents <= 0 {
-			cfg.SpeechCents = def.SpeechCents
-		}
-		cfg.SpeechYuan = formatYuan(cfg.SpeechCents)
-	} else if cents, err := parseYuan(cfg.SpeechYuan); err == nil {
-		cfg.SpeechCents = cents
-		cfg.SpeechYuan = formatYuan(cents)
+	if cfg.Winners <= 0 {
+		cfg.Winners = def.Winners
 	}
 	return cfg
 }
@@ -163,15 +162,9 @@ func saveCommunityConfig(c CommunityConfig) error {
 	if c.SpeechNeed < 1 || c.SpeechNeed > 1000 {
 		return errors.New("每日发言条数需在 1 到 1000")
 	}
-	if c.MinSpeakers < 1 || c.MinSpeakers > 100000 {
-		return errors.New("最少参与人数需在 1 到 100000")
+	if c.Winners < 1 || c.Winners > 1000 {
+		return errors.New("每天中奖人数需在 1 到 1000")
 	}
-	speechCents, err := parseYuan(c.SpeechYuan)
-	if err != nil {
-		return errors.New("发言奖励额度需在 0.01 到 10000 元")
-	}
-	c.SpeechCents = speechCents
-	c.SpeechYuan = formatYuan(speechCents)
 	c.ChatID = strings.TrimSpace(c.ChatID)
 	raw, err := json.Marshal(c)
 	if err != nil {
@@ -243,6 +236,8 @@ func applyCommunity(msg communityMessage, now time.Time) (string, string) {
 		return joinSpeech(msg, now)
 	case "leave":
 		return leaveSpeech(msg)
+	case "pool":
+		return poolReply(msg, now), ""
 	default:
 		return "", ""
 	}
@@ -269,20 +264,22 @@ func applyPrivate(msg communityMessage, name, rest string, now time.Time) (strin
 		return joinSpeech(msg, now)
 	case "leave":
 		return leaveSpeech(msg)
+	case "pool":
+		return poolReply(msg, now), ""
 	default:
-		return "发送 /join 参加每日发言。积分兑换请发送 /redeem 1。", ""
+		return "发送 /join 参加每日抽奖。积分兑换请发送 /redeem 1。", ""
 	}
 }
 
 func communityHelp() string {
 	conf := loadCommunityConfig()
 	return strings.Join([]string{
-		"每日发言要先 /join，没报名的发言不计数。报名后会显示当前人数。",
-		fmt.Sprintf("当天报名或发言不足 %d 人，报名作废，需要重新 /join。", conf.MinSpeakers),
-		fmt.Sprintf("人数达标后，自己满 %d 条，次日自动私信 %s 元 CDK。", conf.SpeechNeed, conf.SpeechYuan),
+		"每日抽奖要先 /join，没报名的发言不计数。报名一次长期有效。",
+		fmt.Sprintf("每天发言满 %d 句进入当天抽奖池，次日随机抽 %d 人，私信发奖。", conf.SpeechNeed, conf.Winners),
 		"请先私聊机器人 /start，否则兑换码发不出去。",
 		"/join   报名参加",
 		"/leave   退出，之后不再计数",
+		"/pool   查看今天奖池和奖品",
 		"/points   查看积分",
 		"/redeem 1   只能私聊用积分兑换",
 		"/code   没收到兑换码时再要一次",
@@ -462,9 +459,12 @@ func takeCode(cents int) (string, int64, error) {
 
 func resendOwnCode(msg communityMessage) (string, string) {
 	var code string
-	err := db.QueryRow(`SELECT c.code FROM reward_codes c WHERE c.used_by = ? ORDER BY c.used_at DESC LIMIT 1`, strconv.FormatInt(msg.UserID, 10)).Scan(&code)
+	err := db.QueryRow(`SELECT code FROM (
+		SELECT code, used_at FROM reward_codes WHERE used_by = ?
+		UNION ALL SELECT code, used_at FROM lottery_prizes WHERE status = 'used' AND winner_id = ?
+	) ORDER BY used_at DESC LIMIT 1`, strconv.FormatInt(msg.UserID, 10), msg.UserID).Scan(&code)
 	if err != nil {
-		return "还没有可发送的兑换码。请先用积分发送 /redeem 1。", ""
+		return "还没有可发送的兑换码。", ""
 	}
 	return "兑换码已再私聊发送一次。如果仍收不到，请先发送 /start。", code
 }
@@ -493,6 +493,8 @@ func activityLabel(activity string) string {
 		return "兑换"
 	case "speech":
 		return "每日发言"
+	case "lottery":
+		return "每日抽奖"
 	default:
 		return activity
 	}
@@ -689,8 +691,8 @@ func recentRewards(limit int) []tgLogLine {
 		if activity == "redeem" {
 			text = name + " · 兑换" + tier + " · " + strconv.Itoa(points) + " 积分"
 		}
-		if activity == "speech" {
-			text = name + " · 每日发言 · " + tier
+		if activity == "speech" || activity == "lottery" {
+			text = name + " · " + activityLabel(activity) + " · " + tier
 		}
 		out = append(out, tgLogLine{
 			Time: time.Unix(ts, 0).In(shanghai).Format("01-02 15:04"),
@@ -710,6 +712,8 @@ func adminCommunity(w http.ResponseWriter, r *http.Request) {
 			"logs":      recentRewards(40),
 			"speech":    speechToday(time.Now()),
 			"dashboard": speechDashboard(time.Now()),
+			"prizes":    listPrizes(300),
+			"prizeLeft": prizeCount(),
 		})
 	case http.MethodPut:
 		var body CommunityConfig
@@ -775,21 +779,6 @@ func adminCommunityCodes(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeAdminJSON(w, 405, map[string]string{"error": "method not allowed"})
 	}
-}
-
-func joinSpeech(msg communityMessage, now time.Time) (string, string) {
-	conf := loadCommunityConfig()
-	_, err := db.Exec(`INSERT INTO community_members (user_id, user_name, joined_at) VALUES (?, ?, ?)
-		ON CONFLICT(user_id) DO UPDATE SET user_name = excluded.user_name`,
-		msg.UserID, msg.displayName(), now.Unix())
-	if err != nil {
-		return "报名失败，请稍后再试。", ""
-	}
-	var signed int
-	_ = db.QueryRow(`SELECT COUNT(*) FROM community_members`).Scan(&signed)
-	said := speechCount(msg.UserID, speechDay(now))
-	return fmt.Sprintf("%s 已报名。当前报名 %d/%d 人。今天 %d/%d 条。人数达不到 %d 人时，当天报名会作废。达标后满 %d 条的人次日私信 %s 元 CDK。请先私聊机器人 /start。",
-		msg.displayName(), signed, conf.MinSpeakers, said, conf.SpeechNeed, conf.MinSpeakers, conf.SpeechNeed, conf.SpeechYuan), ""
 }
 
 func leaveSpeech(msg communityMessage) (string, string) {
@@ -888,15 +877,15 @@ type dashLine struct {
 }
 
 type speechDash struct {
-	Members     int        `json:"members"`
-	Speakers    int        `json:"speakers"`
-	Qualified   int        `json:"qualified"`
-	Messages    int        `json:"messages"`
-	Need        int        `json:"need"`
-	MinSpeakers int        `json:"minSpeakers"`
-	Users       []dashUser `json:"users"`
-	Days        []dashDay  `json:"days"`
-	Lines       []dashLine `json:"lines"`
+	Members   int        `json:"members"`
+	Speakers  int        `json:"speakers"`
+	Qualified int        `json:"qualified"`
+	Messages  int        `json:"messages"`
+	Need      int        `json:"need"`
+	Winners   int        `json:"winners"`
+	Users     []dashUser `json:"users"`
+	Days      []dashDay  `json:"days"`
+	Lines     []dashLine `json:"lines"`
 }
 
 func speechDashboard(now time.Time) speechDash {
@@ -904,7 +893,7 @@ func speechDashboard(now time.Time) speechDash {
 	today := speechToday(now)
 	out := speechDash{
 		Members: today.Members, Speakers: today.Speakers, Qualified: today.Qualified,
-		Need: conf.SpeechNeed, MinSpeakers: conf.MinSpeakers,
+		Need: conf.SpeechNeed, Winners: conf.Winners,
 		Users: []dashUser{}, Days: []dashDay{}, Lines: []dashLine{},
 	}
 	day := speechDay(now)
@@ -977,126 +966,6 @@ func settleDue(now time.Time) {
 	for _, day := range days {
 		settleSpeechDay(day, now)
 	}
-	closeQuietSignups(now)
-}
-
-func settleSpeechDay(day string, now time.Time) {
-	conf := loadCommunityConfig()
-	var settled int
-	_ = db.QueryRow(`SELECT COUNT(*) FROM daily_settle WHERE day = ?`, day).Scan(&settled)
-	if settled > 0 {
-		return
-	}
-	var participants int
-	_ = db.QueryRow(`SELECT COUNT(*) FROM daily_speech s JOIN community_members m ON m.user_id = s.user_id WHERE s.day = ? AND s.messages > 0`, day).Scan(&participants)
-	if participants < conf.MinSpeakers {
-		_, _ = db.Exec(`INSERT INTO daily_settle (day, participants, rewarded, settled_at) VALUES (?, ?, 0, ?)`, day, participants, now.Unix())
-		cohort := voidSignups(day)
-		notifyGroup(fmt.Sprintf("%s 报名 %d 人、发言 %d 人，未满 %d 人，不发放 CDK。报名已作废，请重新 /join。", day, cohort, participants, conf.MinSpeakers))
-		return
-	}
-	rows, err := db.Query(`SELECT s.user_id, s.user_name FROM daily_speech s JOIN community_members m ON m.user_id = s.user_id WHERE s.day = ? AND s.messages >= ? AND s.rewarded = 0 ORDER BY s.user_id`, day, conf.SpeechNeed)
-	if err != nil {
-		return
-	}
-	type winner struct {
-		id   int64
-		name string
-	}
-	var winners []winner
-	for rows.Next() {
-		var item winner
-		if rows.Scan(&item.id, &item.name) == nil {
-			winners = append(winners, item)
-		}
-	}
-	rows.Close()
-	label := formatYuan(conf.SpeechCents) + "元"
-	paid, failed := 0, 0
-	for _, item := range winners {
-		code, err := grantSpeechCode(item.id, item.name, conf.SpeechCents, label, now)
-		if err != nil {
-			if stateGet("speech_wait:"+day) != "1" {
-				notifyGroup(fmt.Sprintf("%s 已有 %d 人发言，但 %s CDK 库存不足，暂时发不出去。", day, participants, label))
-				_ = stateSet("speech_wait:"+day, "1")
-			}
-			return
-		}
-		_, _ = db.Exec(`UPDATE daily_speech SET rewarded = 1 WHERE day = ? AND user_id = ?`, day, item.id)
-		if notifyUser(item.id, "每日发言达标，你的 "+label+" CDK：\n"+code+"\n请妥善保存，群里不会公布。") != nil {
-			failed++
-		} else {
-			paid++
-		}
-	}
-	_, _ = db.Exec(`INSERT INTO daily_settle (day, participants, rewarded, settled_at) VALUES (?, ?, ?, ?)`, day, participants, paid, now.Unix())
-	_ = stateSet("speech_wait:"+day, "")
-	notice := fmt.Sprintf("%s 已有 %d 人发言，达到 %d 人。满 %d 条的 %d 人已处理，私信成功 %d 人，每人 %s CDK。", day, participants, conf.MinSpeakers, conf.SpeechNeed, len(winners), paid, label)
-	if failed > 0 {
-		notice += " 私信失败的请先 /start，再发送 /code。"
-	}
-	_ = stateSet("signup_closed:"+day, "1")
-	notifyGroup(notice)
-}
-
-func voidSignups(day string) int {
-	if stateGet("signup_closed:"+day) == "1" {
-		return 0
-	}
-	start, err := time.ParseInLocation("2006-01-02", day, shanghai)
-	if err != nil {
-		return 0
-	}
-	cutoff := start.AddDate(0, 0, 1).Unix()
-	var cohort int
-	_ = db.QueryRow(`SELECT COUNT(*) FROM community_members WHERE joined_at < ?`, cutoff).Scan(&cohort)
-	if cohort > 0 {
-		_, _ = db.Exec(`DELETE FROM community_members WHERE joined_at < ?`, cutoff)
-	}
-	_ = stateSet("signup_closed:"+day, "1")
-	return cohort
-}
-
-func closeQuietSignups(now time.Time) {
-	conf := loadCommunityConfig()
-	if !conf.Enabled {
-		return
-	}
-	day := speechDay(now.In(shanghai).AddDate(0, 0, -1))
-	if stateGet("signup_closed:"+day) == "1" {
-		return
-	}
-	start, err := time.ParseInLocation("2006-01-02", day, shanghai)
-	if err != nil {
-		return
-	}
-	cutoff := start.AddDate(0, 0, 1).Unix()
-	var cohort, speakers int
-	_ = db.QueryRow(`SELECT COUNT(*) FROM community_members WHERE joined_at < ?`, cutoff).Scan(&cohort)
-	_ = db.QueryRow(`SELECT COUNT(*) FROM daily_speech s JOIN community_members m ON m.user_id = s.user_id WHERE s.day = ? AND s.messages > 0 AND m.joined_at < ?`, day, cutoff).Scan(&speakers)
-	if cohort == 0 || speakers >= conf.MinSpeakers {
-		_ = stateSet("signup_closed:"+day, "1")
-		return
-	}
-	voidSignups(day)
-	notifyGroup(fmt.Sprintf("%s 报名 %d 人、发言 %d 人，未满 %d 人，报名已作废，请重新 /join。", day, cohort, speakers, conf.MinSpeakers))
-}
-
-func grantSpeechCode(userID int64, name string, cents int, label string, now time.Time) (string, error) {
-	communityMu.Lock()
-	defer communityMu.Unlock()
-	code, codeID, err := takeCode(cents)
-	if err != nil {
-		return "", err
-	}
-	mark, err := db.Exec(`UPDATE reward_codes SET status = 'used', used_by = ?, used_name = ?, activity = 'speech', used_at = ? WHERE id = ? AND status = 'available'`,
-		strconv.FormatInt(userID, 10), name, now.Unix(), codeID)
-	if err != nil || rowsOf(mark) == 0 {
-		return "", errors.New("没有这个额度的兑换码")
-	}
-	_, _ = db.Exec(`INSERT INTO reward_logs (activity, tier, user_id, user_name, text, created_at, code_id, points) VALUES ('speech', ?, ?, ?, ?, ?, ?, 0)`,
-		label, userID, name, "每日发言", now.Unix(), codeID)
-	return code, nil
 }
 
 func notifyUser(userID int64, text string) error {

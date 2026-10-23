@@ -83,19 +83,21 @@ func TestCommunityRedeem(t *testing.T) {
 	}
 }
 
-func TestDailySpeechNeedsJoinedQuorum(t *testing.T) {
+func TestDailyLotteryDrawsFromQualifiedPool(t *testing.T) {
 	openCommunityDB(t)
 	conf := defaultCommunityConfig()
 	conf.Enabled = true
 	conf.ChatID = "-1001"
 	conf.SpeechNeed = 2
-	conf.MinSpeakers = 2
-	conf.SpeechYuan = "1"
+	conf.Winners = 1
 	if err := saveCommunityConfig(conf); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := importCodes(100, "CDK-A\nCDK-B\n"); err != nil {
-		t.Fatal(err)
+	if _, err := importPrizes("", "CDK-X"); err == nil {
+		t.Fatal("prize without name should fail")
+	}
+	if n, err := importPrizes("5元额度", "CDK-A\nCDK-B\nCDK-A\n"); err != nil || n != 2 {
+		t.Fatalf("import %d %v", n, err)
 	}
 	oldSend := communitySend
 	var sent []string
@@ -107,80 +109,111 @@ func TestDailySpeechNeedsJoinedQuorum(t *testing.T) {
 	oldCfg := cfg
 	cfg.Telegram.BotToken = "token"
 	t.Cleanup(func() { cfg = oldCfg })
+	oldShuffle := lotteryShuffle
+	// Reverse order so the last pool entry wins deterministically.
+	lotteryShuffle = func(n int, swap func(i, j int)) {
+		for i := 0; i < n/2; i++ {
+			swap(i, n-1-i)
+		}
+	}
+	t.Cleanup(func() { lotteryShuffle = oldShuffle })
 
-	day1 := time.Date(2026, 10, 17, 12, 0, 0, 0, shanghai)
+	day := time.Date(2026, 10, 17, 12, 0, 0, 0, shanghai)
 	ada := communityMessage{ChatID: -1001, UserID: 7, UserName: "ada", Text: "hello"}
-	recordSpeech(ada, day1)
+	recordSpeech(ada, day)
 	if speechCount(7, "2026-10-17") != 0 {
 		t.Fatal("speech before join was counted")
 	}
 	ada.Text = "/join"
-	reply, _ := applyCommunity(ada, day1)
-	if !strings.Contains(reply, "当前报名 1/2") {
+	reply, _ := applyCommunity(ada, day)
+	if !strings.Contains(reply, "当前共 1 人报名") || !strings.Contains(reply, "今日奖池 0 人") {
 		t.Fatalf("join %q", reply)
 	}
-	recordSpeech(ada, day1)
-	ada.Text = "one"
-	recordSpeech(ada, day1)
-	ada.Text = "one"
-	recordSpeech(ada, day1)
-	ada.Text = "two"
-	recordSpeech(ada, day1)
-	if speechCount(7, "2026-10-17") != 2 {
-		t.Fatalf("ada count %d", speechCount(7, "2026-10-17"))
+	bob := communityMessage{ChatID: -1001, UserID: 8, UserName: "bob", Text: "/join"}
+	applyCommunity(bob, day)
+	cat := communityMessage{ChatID: -1001, UserID: 9, UserName: "cat", Text: "/join"}
+	applyCommunity(cat, day)
+	for _, text := range []string{"a1", "a1", "a2"} {
+		ada.Text = text
+		recordSpeech(ada, day)
 	}
-	settleDue(time.Date(2026, 10, 18, 0, 10, 0, 0, shanghai))
-	if speechMember(7) {
-		t.Fatal("signup should be void after missing headcount")
+	for _, text := range []string{"b1", "b2"} {
+		bob.Text = text
+		recordSpeech(bob, day)
 	}
-	var left int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM reward_codes WHERE status = 'available'`).Scan(&left); err != nil {
-		t.Fatal(err)
-	}
-	if left != 2 {
-		t.Fatalf("codes left %d", left)
+	cat.Text = "c1"
+	recordSpeech(cat, day)
+	cat.Text = "/pool"
+	if reply, _ = applyCommunity(cat, day); !strings.Contains(reply, "今日奖池 2 人") || !strings.Contains(reply, "5元额度 × 2") {
+		t.Fatalf("pool %q", reply)
 	}
 
-	day2 := time.Date(2026, 10, 18, 12, 0, 0, 0, shanghai)
-	ada.Text = "/join"
-	if reply, _ = applyCommunity(ada, day2); !strings.Contains(reply, "当前报名 1/2") {
-		t.Fatalf("rejoin %q", reply)
+	settleDue(time.Date(2026, 10, 18, 0, 10, 0, 0, shanghai))
+	var winner int64
+	var used int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM lottery_prizes WHERE status = 'used'`).Scan(&used)
+	_ = db.QueryRow(`SELECT winner_id FROM lottery_prizes WHERE code = 'CDK-A'`).Scan(&winner)
+	if used != 1 || winner != 8 {
+		t.Fatalf("used %d winner %d", used, winner)
 	}
-	bob := communityMessage{ChatID: -1001, UserID: 8, UserName: "bob", Text: "/join"}
-	reply, code := applyCommunity(bob, day2)
-	if code != "" || !strings.Contains(reply, "当前报名 2/2") {
-		t.Fatalf("bob join %q", reply)
+	if !speechMember(7) || !speechMember(9) {
+		t.Fatal("signups should stay after the draw")
 	}
-	ada.Text = "a1"
-	recordSpeech(ada, day2)
-	ada.Text = "a2"
-	recordSpeech(ada, day2)
-	bob.Text = "b1"
-	recordSpeech(bob, day2)
-	settleDue(time.Date(2026, 10, 19, 0, 10, 0, 0, shanghai))
-	var usedBy string
-	if err := db.QueryRow(`SELECT used_by FROM reward_codes WHERE code = 'CDK-A'`).Scan(&usedBy); err != nil {
-		t.Fatal(err)
-	}
-	if usedBy != "7" {
-		t.Fatalf("used by %s", usedBy)
-	}
-	var bobCode string
-	_ = db.QueryRow(`SELECT code FROM reward_codes WHERE used_by = '8'`).Scan(&bobCode)
-	if bobCode != "" {
-		t.Fatalf("bob got %s", bobCode)
-	}
-	dm, groupHasCode := false, false
+	dm, groupHasCode, announced := false, false, false
 	for _, item := range sent {
-		if strings.HasPrefix(item, "7 ") && strings.Contains(item, "CDK-A") {
+		if strings.HasPrefix(item, "8 ") && strings.Contains(item, "CDK-A") && strings.Contains(item, "5元额度") {
 			dm = true
 		}
-		if strings.HasPrefix(item, "-1001 ") && strings.Contains(item, "CDK-A") {
-			groupHasCode = true
+		if strings.HasPrefix(item, "-1001 ") {
+			groupHasCode = groupHasCode || strings.Contains(item, "CDK-A")
+			announced = announced || strings.Contains(item, "奖池 2 人")
 		}
 	}
-	if !dm || groupHasCode {
+	if !dm || groupHasCode || !announced {
 		t.Fatalf("sent %#v", sent)
+	}
+	settleDue(time.Date(2026, 10, 18, 0, 20, 0, 0, shanghai))
+	_ = db.QueryRow(`SELECT COUNT(*) FROM lottery_prizes WHERE status = 'used'`).Scan(&used)
+	if used != 1 {
+		t.Fatalf("day settled twice, used %d", used)
+	}
+	bob.Text = "/code"
+	if _, code := applyCommunity(bob, day.Add(24*time.Hour)); code != "CDK-A" {
+		t.Fatalf("resend %q", code)
+	}
+	if removed := deletePrizes([]int64{1, 2}); removed != 1 {
+		t.Fatalf("removed %d", removed)
+	}
+}
+
+func TestLotteryWaitsForStock(t *testing.T) {
+	openCommunityDB(t)
+	conf := defaultCommunityConfig()
+	conf.Enabled = true
+	conf.ChatID = "-1001"
+	conf.SpeechNeed = 1
+	if err := saveCommunityConfig(conf); err != nil {
+		t.Fatal(err)
+	}
+	day := time.Date(2026, 10, 17, 12, 0, 0, 0, shanghai)
+	ada := communityMessage{ChatID: -1001, UserID: 7, UserName: "ada", Text: "/join"}
+	applyCommunity(ada, day)
+	ada.Text = "hi"
+	recordSpeech(ada, day)
+	settleDue(time.Date(2026, 10, 18, 0, 10, 0, 0, shanghai))
+	var settled int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM daily_settle`).Scan(&settled)
+	if settled != 0 {
+		t.Fatal("should wait for prizes before settling")
+	}
+	if _, err := importPrizes("1元", "CDK-LATE"); err != nil {
+		t.Fatal(err)
+	}
+	settleDue(time.Date(2026, 10, 18, 0, 20, 0, 0, shanghai))
+	var winner int64
+	_ = db.QueryRow(`SELECT winner_id FROM lottery_prizes WHERE code = 'CDK-LATE'`).Scan(&winner)
+	if winner != 7 {
+		t.Fatalf("winner %d", winner)
 	}
 }
 

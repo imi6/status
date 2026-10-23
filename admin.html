@@ -295,14 +295,13 @@ table.grid-table tbody tr.active{background:var(--panel-2)}
     </section>
     <section class="card">
       <h2>群活动</h2>
-      <p class="hint">用户发送 /join 后会计入报名人数，并告诉他当前报了多少人。当天结束时如果人数没达到最少参与人数，这批报名会作废，需要重新报名。达标后，发言条数够的人会在次日收到私信 CDK。</p>
+      <p class="hint">用户发送 /join 报名，报名长期有效。报名后当天发言满指定句数（重复内容不计）即进入当天抽奖池，次日 0 点后从奖池随机抽取中奖人，私信发放下方奖品库里的 CDK，群里只公布中奖人和奖品名。</p>
       <form id="communityForm">
         <div class="grid">
           <label class="check"><input name="enabled" type="checkbox">开启群活动</label>
           <label>活动群 ID<input name="chatID" spellcheck="false" placeholder="留空则用第一个推送群"></label>
-          <label>每日发言条数<input name="speechNeed" type="number" min="1" max="1000" value="10"></label>
-          <label>发言奖励（元）<input name="speechYuan" inputmode="decimal" value="1" placeholder="1"></label>
-          <label>最少参与人数<input name="minSpeakers" type="number" min="1" max="100000" value="100"></label>
+          <label>每日发言句数<input name="speechNeed" type="number" min="1" max="1000" value="5"></label>
+          <label>每天中奖人数<input name="winners" type="number" min="1" max="1000" value="1"></label>
           <label>多少积分<input name="ratePoints" type="number" min="1" max="10000" value="10"></label>
           <label>等于多少元额度<input name="rateYuan" inputmode="decimal" value="1" placeholder="1"></label>
           <label>最低兑换积分<input name="minPoints" type="number" min="1" max="10000" value="10"></label>
@@ -311,7 +310,25 @@ table.grid-table tbody tr.active{background:var(--panel-2)}
       </form>
     </section>
     <section class="card">
-      <h2>导入 CDK</h2>
+      <h2>抽奖奖品</h2>
+      <form id="prizeForm">
+        <div class="grid">
+          <label>奖品名称<input name="name" required maxlength="40" placeholder="例如 5元额度"></label>
+          <label class="wide">CDK<textarea name="codes" required placeholder="每行一个，同一批使用上面的名称"></textarea></label>
+        </div>
+        <p class="hint" id="prizeStock">奖品读取中…</p>
+        <div class="row-actions"><button type="submit">添加奖品</button></div>
+      </form>
+      <div class="table-wrap">
+        <table class="grid-table" id="prizeTable">
+          <thead><tr><th></th><th>奖品</th><th>CDK</th><th>状态</th><th>中奖人</th><th>日期</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="row-actions"><button type="button" class="warn" id="prizeDelete">删除选中的未发出奖品</button></div>
+    </section>
+    <section class="card">
+      <h2>积分兑换 CDK</h2>
       <form id="cdkForm">
         <div class="grid">
           <label>额度（元）<input name="amount" inputmode="decimal" required value="1" placeholder="1"></label>
@@ -1114,7 +1131,8 @@ function renderSpeechDash(dash){
     [dash.members || 0, '今日报名'],
     [dash.speakers || 0, '今日发言人数'],
     [dash.messages || 0, '今日条数'],
-    [(dash.qualified || 0) + '/' + (dash.need || 10), '已满条数']
+    [dash.qualified || 0, '今日奖池（满 ' + (dash.need || 5) + ' 句）'],
+    [dash.winners || 1, '每天中奖人数']
   ];
   const box = $('speechStats');
   box.replaceChildren();
@@ -1159,15 +1177,15 @@ async function loadCommunity(){
     const cfg = data.config || {};
     f.enabled.checked = !!cfg.enabled;
     f.chatID.value = cfg.chatID || '';
-    f.speechNeed.value = cfg.speechNeed || 10;
-    f.speechYuan.value = cfg.speechYuan || '1';
-    f.minSpeakers.value = cfg.minSpeakers || 100;
+    f.speechNeed.value = cfg.speechNeed || 5;
+    f.winners.value = cfg.winners || 1;
+    renderPrizes(data.prizes || [], data.prizeLeft || 0);
     f.ratePoints.value = cfg.ratePoints || 10;
     f.rateYuan.value = cfg.rateYuan || '1';
     f.minPoints.value = cfg.minPoints || 10;
     const stock = data.stock || [];
     const speech = data.speech || {};
-    $('cdkStock').textContent = (stock.length ? ('库存 ' + stock.map(item => item.yuan + '元 × ' + item.count + '（' + item.points + '积分）').join(' · ')) : '暂无 CDK。') + ' 今日报名 ' + (speech.members || 0) + '，已发言 ' + (speech.speakers || 0) + '，满条数 ' + (speech.qualified || 0) + '。';
+    $('cdkStock').textContent = (stock.length ? ('库存 ' + stock.map(item => item.yuan + '元 × ' + item.count + '（' + item.points + '积分）').join(' · ')) : '暂无 CDK。') + ' 报名 ' + (speech.members || 0) + '，今日已发言 ' + (speech.speakers || 0) + '，今日奖池 ' + (speech.qualified || 0) + '。';
     renderSpeechDash(data.dashboard);
     const codes = data.codes || [];
     const list = $('cdkList');
@@ -1194,14 +1212,49 @@ $('communityForm').addEventListener('submit', async (e) => {
     await api('/api/admin/community', {method:'PUT', body:{
       enabled: f.enabled.checked,
       chatID: f.chatID.value,
-      speechNeed: Number(f.speechNeed.value || 10),
-      speechYuan: String(f.speechYuan.value || '1').trim(),
-      minSpeakers: Number(f.minSpeakers.value || 100),
+      speechNeed: Number(f.speechNeed.value || 5),
+      winners: Number(f.winners.value || 1),
       ratePoints: Number(f.ratePoints.value || 10),
       rateYuan: String(f.rateYuan.value || '1').trim(),
       minPoints: Number(f.minPoints.value || 10)
     }});
     showMsg('活动设置已保存。', false);
+    loadCommunity();
+  } catch (err) { showMsg(err.message, true); }
+});
+function renderPrizes(prizes, left){
+  $('prizeStock').textContent = '未发出 ' + left + ' 个，共显示 ' + prizes.length + ' 条。库存不足时当天会等补货后再开奖。';
+  fillBody($('prizeTable'), prizes, item => {
+    const tr = document.createElement('tr');
+    const pick = document.createElement('td');
+    if (item.status === 'available') {
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.value = String(item.id);
+      input.setAttribute('aria-label', '选择 ' + item.name + ' ' + item.code);
+      pick.append(input);
+    }
+    tr.append(pick, cell(item.name, 'wrap'), cell(item.code, 'wrap'), cell(item.status === 'used' ? '已发出' : '待抽', 'num'), cell(item.winner || '', 'num'), cell(item.day || '', 'num'));
+    return tr;
+  });
+}
+$('prizeForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  try {
+    const data = await api('/api/admin/community-prizes', {method:'POST', body:{name:f.name.value, codes:f.codes.value}});
+    f.codes.value = '';
+    showMsg('已添加 ' + (data.added || 0) + ' 个奖品。', false);
+    loadCommunity();
+  } catch (err) { showMsg(err.message, true); }
+});
+$('prizeDelete').addEventListener('click', async () => {
+  const ids = [...$('prizeTable').querySelectorAll('input:checked')].map(input => Number(input.value));
+  if (!ids.length) { showMsg('请先勾选未发出的奖品。', true); return; }
+  if (!confirm('删除选中的 ' + ids.length + ' 个未发出奖品？')) return;
+  try {
+    const data = await api('/api/admin/community-prizes', {method:'DELETE', body:{ids}});
+    showMsg('已删除 ' + (data.removed || 0) + ' 个奖品。', false);
     loadCommunity();
   } catch (err) { showMsg(err.message, true); }
 });

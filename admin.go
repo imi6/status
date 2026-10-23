@@ -1334,6 +1334,11 @@ func apiAdmin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		adminCommunityCodes(w, r)
+	case "community-prizes":
+		if !requireAdmin(w, r) {
+			return
+		}
+		adminCommunityPrizes(w, r)
 	default:
 		writeAdminJSON(w, 404, map[string]string{"error": "not found"})
 	}
