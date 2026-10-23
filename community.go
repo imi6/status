@@ -26,12 +26,13 @@ type CommunityConfig struct {
 	MinPoints  int    `json:"minPoints"`
 	SpeechNeed int    `json:"speechNeed"`
 	Winners    int    `json:"winners"`
+	CleanLines bool   `json:"cleanLines"`
 }
 
 func defaultCommunityConfig() CommunityConfig {
 	return CommunityConfig{
 		RatePoints: 10, RateYuan: "1", RateCents: 100, MinPoints: 10,
-		SpeechNeed: 5, Winners: 1,
+		SpeechNeed: 5, Winners: 1, CleanLines: true,
 	}
 }
 
@@ -714,6 +715,7 @@ func adminCommunity(w http.ResponseWriter, r *http.Request) {
 			"dashboard": speechDashboard(time.Now()),
 			"prizes":    listPrizes(300),
 			"prizeLeft": prizeCount(),
+			"lineCount": speechLineCount(),
 		})
 	case http.MethodPut:
 		var body CommunityConfig
@@ -851,16 +853,6 @@ func speechToday(now time.Time) speechSnapshot {
 	return out
 }
 
-type dashUser struct {
-	UserID   int64  `json:"userID"`
-	Name     string `json:"name"`
-	Today    int    `json:"today"`
-	Total    int    `json:"total"`
-	Days     int    `json:"days"`
-	Rewarded int    `json:"rewarded"`
-	LastDay  string `json:"lastDay"`
-}
-
 type dashDay struct {
 	Day      string `json:"day"`
 	Speakers int    `json:"speakers"`
@@ -868,24 +860,14 @@ type dashDay struct {
 	Rewarded int    `json:"rewarded"`
 }
 
-type dashLine struct {
-	Time   string `json:"time"`
-	Day    string `json:"day"`
-	UserID int64  `json:"userID"`
-	Name   string `json:"name"`
-	Text   string `json:"text"`
-}
-
 type speechDash struct {
-	Members   int        `json:"members"`
-	Speakers  int        `json:"speakers"`
-	Qualified int        `json:"qualified"`
-	Messages  int        `json:"messages"`
-	Need      int        `json:"need"`
-	Winners   int        `json:"winners"`
-	Users     []dashUser `json:"users"`
-	Days      []dashDay  `json:"days"`
-	Lines     []dashLine `json:"lines"`
+	Members   int       `json:"members"`
+	Speakers  int       `json:"speakers"`
+	Qualified int       `json:"qualified"`
+	Messages  int       `json:"messages"`
+	Need      int       `json:"need"`
+	Winners   int       `json:"winners"`
+	Days      []dashDay `json:"days"`
 }
 
 func speechDashboard(now time.Time) speechDash {
@@ -894,25 +876,11 @@ func speechDashboard(now time.Time) speechDash {
 	out := speechDash{
 		Members: today.Members, Speakers: today.Speakers, Qualified: today.Qualified,
 		Need: conf.SpeechNeed, Winners: conf.Winners,
-		Users: []dashUser{}, Days: []dashDay{}, Lines: []dashLine{},
+		Days: []dashDay{},
 	}
 	day := speechDay(now)
 	_ = db.QueryRow(`SELECT COALESCE(SUM(messages), 0) FROM daily_speech WHERE day = ?`, day).Scan(&out.Messages)
-	rows, err := db.Query(`SELECT user_id, MAX(user_name),
-		SUM(CASE WHEN day = ? THEN messages ELSE 0 END),
-		SUM(messages), COUNT(*), SUM(rewarded), MAX(day)
-		FROM daily_speech GROUP BY user_id
-		ORDER BY 3 DESC, 4 DESC, user_id`, day)
-	if err == nil {
-		for rows.Next() {
-			var item dashUser
-			if rows.Scan(&item.UserID, &item.Name, &item.Today, &item.Total, &item.Days, &item.Rewarded, &item.LastDay) == nil {
-				out.Users = append(out.Users, item)
-			}
-		}
-		rows.Close()
-	}
-	rows, err = db.Query(`SELECT day, COUNT(*), COALESCE(SUM(messages), 0), COALESCE(SUM(rewarded), 0)
+	rows, err := db.Query(`SELECT day, COUNT(*), COALESCE(SUM(messages), 0), COALESCE(SUM(rewarded), 0)
 		FROM daily_speech GROUP BY day ORDER BY day DESC LIMIT 30`)
 	if err == nil {
 		for rows.Next() {
@@ -920,26 +888,6 @@ func speechDashboard(now time.Time) speechDash {
 			if rows.Scan(&item.Day, &item.Speakers, &item.Messages, &item.Rewarded) == nil {
 				out.Days = append(out.Days, item)
 			}
-		}
-		rows.Close()
-	}
-	rows, err = db.Query(`SELECT l.day, l.created_at, l.user_id, COALESCE(s.user_name, ''), l.body
-		FROM daily_speech_lines l
-		LEFT JOIN daily_speech s ON s.day = l.day AND s.user_id = l.user_id
-		ORDER BY l.created_at DESC, l.rowid DESC LIMIT 300`)
-	if err == nil {
-		for rows.Next() {
-			var item dashLine
-			var ts int64
-			if rows.Scan(&item.Day, &ts, &item.UserID, &item.Name, &item.Text) != nil {
-				continue
-			}
-			if ts > 0 {
-				item.Time = time.Unix(ts, 0).In(shanghai).Format("01-02 15:04")
-			} else {
-				item.Time = item.Day
-			}
-			out.Lines = append(out.Lines, item)
 		}
 		rows.Close()
 	}
@@ -998,13 +946,74 @@ func startCommunity() {
 }
 
 func communitySettleLoop() {
+	var lastPrune time.Time
 	for {
 		time.Sleep(30 * time.Second)
-		if db == nil || !loadCommunityConfig().Enabled {
+		if db == nil {
+			continue
+		}
+		conf := loadCommunityConfig()
+		if conf.CleanLines && time.Since(lastPrune) >= 10*time.Minute {
+			pruneSpeechLines(time.Now())
+			lastPrune = time.Now()
+		}
+		if !conf.Enabled {
 			continue
 		}
 		settleDue(time.Now())
 	}
+}
+
+// Chat lines only exist to drop same-day duplicates, so 48 hours is plenty.
+const speechLineKeep = 48 * time.Hour
+
+func pruneSpeechLines(now time.Time) int64 {
+	var removed int64
+	if res, err := db.Exec(`DELETE FROM daily_speech_lines WHERE created_at < ?`, now.Add(-speechLineKeep).Unix()); err == nil {
+		removed += rowsOf(res)
+	}
+	removed += dropSpeechCounts(speechDay(now.Add(-speechLineKeep)))
+	return removed
+}
+
+// dropSpeechCounts removes per-user daily counts before day, but only for days
+// already drawn: an unsettled day still needs its pool.
+func dropSpeechCounts(before string) int64 {
+	res, err := db.Exec(`DELETE FROM daily_speech WHERE day < ? AND day IN (SELECT day FROM daily_settle)`, before)
+	if err != nil {
+		return 0
+	}
+	return rowsOf(res)
+}
+
+// clearSpeechLines keeps today's lines and counts so repeated messages still count once.
+func clearSpeechLines(now time.Time) (int64, error) {
+	res, err := db.Exec(`DELETE FROM daily_speech_lines WHERE day < ?`, speechDay(now))
+	if err != nil {
+		return 0, err
+	}
+	removed := rowsOf(res) + dropSpeechCounts(speechDay(now))
+	_, _ = db.Exec(`VACUUM`)
+	return removed, nil
+}
+
+func speechLineCount() int {
+	var n int
+	_ = db.QueryRow(`SELECT (SELECT COUNT(*) FROM daily_speech_lines) + (SELECT COUNT(*) FROM daily_speech)`).Scan(&n)
+	return n
+}
+
+func adminCommunityLines(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		writeAdminJSON(w, 405, map[string]string{"error": "method not allowed"})
+		return
+	}
+	n, err := clearSpeechLines(time.Now())
+	if err != nil {
+		writeAdminJSON(w, 500, map[string]string{"error": "清理失败"})
+		return
+	}
+	writeAdminJSON(w, 200, map[string]any{"ok": true, "removed": n})
 }
 
 func communityPollLoop() {

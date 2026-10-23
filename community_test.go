@@ -267,10 +267,57 @@ func TestSpeechDashboard(t *testing.T) {
 	ada.Text = "world"
 	recordSpeech(ada, now)
 	dash := speechDashboard(now)
-	if dash.Messages != 2 || dash.Speakers != 1 || len(dash.Users) != 1 || dash.Users[0].Today != 2 || dash.Users[0].Total != 2 {
-		t.Fatalf("dash %+v users %+v", dash, dash.Users)
+	if dash.Messages != 2 || dash.Speakers != 1 {
+		t.Fatalf("dash %+v", dash)
 	}
-	if len(dash.Lines) != 2 || len(dash.Days) != 1 || dash.Days[0].Messages != 2 {
-		t.Fatalf("lines %d days %+v", len(dash.Lines), dash.Days)
+	if len(dash.Days) != 1 || dash.Days[0].Messages != 2 {
+		t.Fatalf("days %+v", dash.Days)
+	}
+}
+
+func TestSpeechLinesCleanup(t *testing.T) {
+	openCommunityDB(t)
+	conf := defaultCommunityConfig()
+	if !conf.CleanLines {
+		t.Fatal("cleanup should be on by default")
+	}
+	conf.Enabled = true
+	conf.ChatID = "-1001"
+	if err := saveCommunityConfig(conf); err != nil {
+		t.Fatal(err)
+	}
+	ada := communityMessage{ChatID: -1001, UserID: 7, UserName: "ada", Text: "/join"}
+	now := time.Date(2026, 10, 20, 12, 0, 0, 0, shanghai)
+	applyCommunity(ada, now)
+	for _, at := range []time.Time{now.Add(-72 * time.Hour), now.Add(-24 * time.Hour), now} {
+		ada.Text = "hi " + at.Format("0102")
+		recordSpeech(ada, at)
+	}
+	lines := func() int {
+		var n int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM daily_speech_lines`).Scan(&n)
+		return n
+	}
+	if n := pruneSpeechLines(now); n != 1 || lines() != 2 {
+		t.Fatalf("pruned %d left %d", n, lines())
+	}
+	if n, err := clearSpeechLines(now); err != nil || n != 1 || lines() != 1 {
+		t.Fatalf("cleared %d left %d err %v", n, lines(), err)
+	}
+	// Today's line survives, so the same text still does not count twice.
+	ada.Text = "hi 1020"
+	recordSpeech(ada, now.Add(time.Minute))
+	if speechCount(7, "2026-10-20") != 1 {
+		t.Fatalf("count %d", speechCount(7, "2026-10-20"))
+	}
+	if speechCount(7, "2026-10-17") != 1 {
+		t.Fatal("counts of a day not yet drawn must survive cleanup")
+	}
+	if _, err := db.Exec(`INSERT INTO daily_settle (day, participants, rewarded, settled_at) VALUES ('2026-10-17', 1, 0, 0)`); err != nil {
+		t.Fatal(err)
+	}
+	pruneSpeechLines(now)
+	if speechCount(7, "2026-10-17") != 0 || speechCount(7, "2026-10-19") != 1 {
+		t.Fatalf("drawn old day should go, recent stays: %d %d", speechCount(7, "2026-10-17"), speechCount(7, "2026-10-19"))
 	}
 }

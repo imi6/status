@@ -269,14 +269,6 @@ table.grid-table tbody tr.active{background:var(--panel-2)}
         <button type="button" class="ghost" id="reloadDash">刷新</button>
       </div>
       <div class="stats" id="speechStats"></div>
-      <h3 class="dash-title">用户次数</h3>
-      <p class="hint">点击某一行，只看这个人的发言记录。再点一次恢复全部。</p>
-      <div class="table-wrap">
-        <table class="grid-table" id="speechUsers">
-          <thead><tr><th>用户</th><th>今日</th><th>累计</th><th>天数</th><th>已发奖</th><th>最近日期</th></tr></thead>
-          <tbody></tbody>
-        </table>
-      </div>
       <h3 class="dash-title">每日汇总</h3>
       <div class="table-wrap">
         <table class="grid-table" id="speechDays">
@@ -285,13 +277,8 @@ table.grid-table tbody tr.active{background:var(--panel-2)}
         </table>
       </div>
       <h3 class="dash-title">发言记录</h3>
-      <p class="hint" id="speechFilter">显示全部用户最近 300 条。</p>
-      <div class="table-wrap">
-        <table class="grid-table" id="speechLines">
-          <thead><tr><th>时间</th><th>用户</th><th>内容</th></tr></thead>
-          <tbody></tbody>
-        </table>
-      </div>
+      <p class="hint" id="lineCount">聊天内容和每人发言次数只在后台记录，不在这里展示。</p>
+      <div class="row-actions"><button type="button" class="warn" id="clearLines">清理历史记录</button></div>
     </section>
     <section class="card">
       <h2>群活动</h2>
@@ -302,6 +289,7 @@ table.grid-table tbody tr.active{background:var(--panel-2)}
           <label>活动群 ID<input name="chatID" spellcheck="false" placeholder="留空则用第一个推送群"></label>
           <label>每日发言句数<input name="speechNeed" type="number" min="1" max="1000" value="5"></label>
           <label>每天中奖人数<input name="winners" type="number" min="1" max="1000" value="1"></label>
+          <label class="check"><input name="cleanLines" type="checkbox" checked>自动清理 48 小时前的聊天和发言次数</label>
           <label>多少积分<input name="ratePoints" type="number" min="1" max="10000" value="10"></label>
           <label>等于多少元额度<input name="rateYuan" inputmode="decimal" value="1" placeholder="1"></label>
           <label>最低兑换积分<input name="minPoints" type="number" min="1" max="10000" value="10"></label>
@@ -1092,9 +1080,6 @@ $('groups').addEventListener('click', (e) => {
   }
 });
 
-let dashLines = [];
-let dashUser = 0;
-
 function cell(text, className){
   const td = document.createElement('td');
   if (className) td.className = className;
@@ -1114,19 +1099,8 @@ function fillBody(table, rows, build){
   }
   rows.forEach(item => body.append(build(item)));
 }
-function renderSpeechLines(){
-  const rows = dashLines.filter(item => !dashUser || item.userID === dashUser);
-  const picked = dashLines.find(item => item.userID === dashUser);
-  $('speechFilter').textContent = dashUser ? ('只看 ' + ((picked && picked.name) || dashUser) + '，再点一次该用户恢复全部。') : '显示全部用户最近 300 条。';
-  fillBody($('speechLines'), rows, item => {
-    const tr = document.createElement('tr');
-    tr.append(cell(item.time || item.day, 'num'), cell(item.name || item.userID, 'num'), cell(item.text || '', 'wrap'));
-    return tr;
-  });
-}
 function renderSpeechDash(dash){
   dash = dash || {};
-  dashLines = dash.lines || [];
   const stats = [
     [dash.members || 0, '今日报名'],
     [dash.speakers || 0, '今日发言人数'],
@@ -1146,27 +1120,19 @@ function renderSpeechDash(dash){
     div.append(b, span);
     box.append(div);
   });
-  fillBody($('speechUsers'), dash.users || [], item => {
-    const tr = document.createElement('tr');
-    tr.dataset.user = String(item.userID);
-    if (dashUser === item.userID) tr.className = 'active';
-    tr.append(cell(item.name || item.userID, 'num'), cell(item.today || 0, 'num'), cell(item.total || 0, 'num'), cell(item.days || 0, 'num'), cell(item.rewarded || 0, 'num'), cell(item.lastDay || '', 'num'));
-    return tr;
-  });
   fillBody($('speechDays'), dash.days || [], item => {
     const tr = document.createElement('tr');
     tr.append(cell(item.day, 'num'), cell(item.speakers || 0, 'num'), cell(item.messages || 0, 'num'), cell(item.rewarded || 0, 'num'));
     return tr;
   });
-  renderSpeechLines();
 }
-$('speechUsers').addEventListener('click', (e) => {
-  const tr = e.target.closest('tr[data-user]');
-  if (!tr) return;
-  const id = Number(tr.dataset.user);
-  dashUser = dashUser === id ? 0 : id;
-  $('speechUsers').querySelectorAll('tbody tr').forEach(row => row.classList.toggle('active', Number(row.dataset.user) === dashUser));
-  renderSpeechLines();
+$('clearLines').addEventListener('click', async () => {
+  if (!confirm('清理今天之前的聊天记录和每人发言次数？今天的和还没开奖的日期会保留，中奖记录不受影响。')) return;
+  try {
+    const data = await api('/api/admin/community-lines', {method:'DELETE'});
+    showMsg('已清理 ' + (data.removed || 0) + ' 条记录。', false);
+    loadCommunity();
+  } catch (err) { showMsg(err.message, true); }
 });
 $('reloadDash').addEventListener('click', () => loadCommunity());
 
@@ -1179,6 +1145,8 @@ async function loadCommunity(){
     f.chatID.value = cfg.chatID || '';
     f.speechNeed.value = cfg.speechNeed || 5;
     f.winners.value = cfg.winners || 1;
+    f.cleanLines.checked = cfg.cleanLines !== false;
+    $('lineCount').textContent = '聊天内容和每人发言次数只在后台记录，不在这里展示。当前保存 ' + (data.lineCount || 0) + ' 条。';
     renderPrizes(data.prizes || [], data.prizeLeft || 0);
     f.ratePoints.value = cfg.ratePoints || 10;
     f.rateYuan.value = cfg.rateYuan || '1';
@@ -1214,6 +1182,7 @@ $('communityForm').addEventListener('submit', async (e) => {
       chatID: f.chatID.value,
       speechNeed: Number(f.speechNeed.value || 5),
       winners: Number(f.winners.value || 1),
+      cleanLines: f.cleanLines.checked,
       ratePoints: Number(f.ratePoints.value || 10),
       rateYuan: String(f.rateYuan.value || '1').trim(),
       minPoints: Number(f.minPoints.value || 10)
