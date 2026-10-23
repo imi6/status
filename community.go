@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 var shanghai = time.FixedZone("UTC+8", 8*3600)
@@ -23,11 +24,14 @@ type CommunityConfig struct {
 	Winners    int    `json:"winners"`
 	MinPool    int    `json:"minPool"`
 	CleanLines bool   `json:"cleanLines"`
+	MinChars   int    `json:"minChars"`
+	Cooldown   int    `json:"cooldown"`
 }
 
 func defaultCommunityConfig() CommunityConfig {
 	return CommunityConfig{
 		SpeechNeed: 5, Winners: 1, MinPool: 100, CleanLines: true,
+		MinChars: 3, Cooldown: 10,
 	}
 }
 
@@ -130,6 +134,9 @@ func loadCommunityConfig() CommunityConfig {
 	if cfg.MinPool <= 0 {
 		cfg.MinPool = def.MinPool
 	}
+	if cfg.MinChars <= 0 {
+		cfg.MinChars = def.MinChars
+	}
 	return cfg
 }
 
@@ -139,6 +146,12 @@ func saveCommunityConfig(c CommunityConfig) error {
 	}
 	if c.Winners < 1 || c.Winners > 1000 {
 		return errors.New("每天中奖人数需在 1 到 1000")
+	}
+	if c.MinChars < 1 || c.MinChars > 50 {
+		return errors.New("每句最少字数需在 1 到 50")
+	}
+	if c.Cooldown < 0 || c.Cooldown > 3600 {
+		return errors.New("两句最短间隔需在 0 到 3600 秒")
 	}
 	if c.MinPool < 1 || c.MinPool > 100000 {
 		return errors.New("最少奖池人数需在 1 到 100000")
@@ -426,8 +439,18 @@ func recordSpeech(msg communityMessage, now time.Time) {
 	if !speechMember(msg.UserID) {
 		return
 	}
-	text = strings.Join(strings.Fields(text), " ")
+	text, ok := speechWorth(text, conf.MinChars)
+	if !ok {
+		return
+	}
 	day := speechDay(now)
+	if conf.Cooldown > 0 {
+		var last int64
+		_ = db.QueryRow(`SELECT COALESCE(MAX(created_at), 0) FROM daily_speech_lines WHERE day = ? AND user_id = ?`, day, msg.UserID).Scan(&last)
+		if now.Unix()-last < int64(conf.Cooldown) {
+			return
+		}
+	}
 	res, err := db.Exec(`INSERT INTO daily_speech_lines (day, user_id, body, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(day, user_id, body) DO NOTHING`, day, msg.UserID, text, now.Unix())
 	if err != nil {
 		return
@@ -438,6 +461,33 @@ func recordSpeech(msg communityMessage, now time.Time) {
 	_, _ = db.Exec(`INSERT INTO daily_speech (day, user_id, user_name, messages, rewarded) VALUES (?, ?, ?, 1, 0)
 		ON CONFLICT(day, user_id) DO UPDATE SET messages = messages + 1, user_name = excluded.user_name`,
 		day, msg.UserID, msg.displayName())
+}
+
+// speechWorth keeps only letters and digits, so "好的！" and "好的" dedupe as one
+// line. It rejects lines shorter than minChars, pure digits like "1" "2" "3",
+// and one character repeated like "哈哈哈哈".
+func speechWorth(text string, minChars int) (string, bool) {
+	var b strings.Builder
+	n, digits := 0, 0
+	seen := map[rune]bool{}
+	for _, r := range strings.ToLower(text) {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+			continue
+		}
+		b.WriteRune(r)
+		n++
+		if unicode.IsDigit(r) {
+			digits++
+		}
+		seen[r] = true
+	}
+	if n == 0 || n < minChars || digits == n {
+		return "", false
+	}
+	if minChars >= 2 && len(seen) < 2 {
+		return "", false
+	}
+	return b.String(), true
 }
 
 type speechSnapshot struct {

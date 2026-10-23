@@ -30,6 +30,7 @@ func openCommunityDB(t *testing.T) {
 func TestDailyLotteryDrawsFromQualifiedPool(t *testing.T) {
 	openCommunityDB(t)
 	conf := defaultCommunityConfig()
+	conf.MinChars, conf.Cooldown = 1, 0
 	conf.Enabled = true
 	conf.ChatID = "-1001"
 	conf.SpeechNeed = 2
@@ -134,6 +135,7 @@ func TestDailyLotteryDrawsFromQualifiedPool(t *testing.T) {
 func TestLotterySkipsSmallPool(t *testing.T) {
 	openCommunityDB(t)
 	conf := defaultCommunityConfig()
+	conf.MinChars, conf.Cooldown = 1, 0
 	if conf.MinPool != 100 {
 		t.Fatalf("default min pool %d", conf.MinPool)
 	}
@@ -190,6 +192,7 @@ func TestLotterySkipsSmallPool(t *testing.T) {
 func TestLotteryDailyPlan(t *testing.T) {
 	openCommunityDB(t)
 	conf := defaultCommunityConfig()
+	conf.MinChars, conf.Cooldown = 1, 0
 	conf.Enabled = true
 	conf.ChatID = "-1001"
 	conf.SpeechNeed = 1
@@ -265,6 +268,7 @@ func TestLotteryDailyPlan(t *testing.T) {
 func TestLotteryWaitsForStock(t *testing.T) {
 	openCommunityDB(t)
 	conf := defaultCommunityConfig()
+	conf.MinChars, conf.Cooldown = 1, 0
 	conf.Enabled = true
 	conf.ChatID = "-1001"
 	conf.SpeechNeed = 1
@@ -317,6 +321,7 @@ func TestOldCodesMoveToPrizes(t *testing.T) {
 func TestSpeechDashboard(t *testing.T) {
 	openCommunityDB(t)
 	conf := defaultCommunityConfig()
+	conf.MinChars, conf.Cooldown = 1, 0
 	conf.Enabled = true
 	conf.ChatID = "-1001"
 	conf.SpeechNeed = 2
@@ -343,6 +348,7 @@ func TestSpeechDashboard(t *testing.T) {
 func TestSpeechLinesCleanup(t *testing.T) {
 	openCommunityDB(t)
 	conf := defaultCommunityConfig()
+	conf.MinChars, conf.Cooldown = 1, 0
 	if !conf.CleanLines {
 		t.Fatal("cleanup should be on by default")
 	}
@@ -384,5 +390,69 @@ func TestSpeechLinesCleanup(t *testing.T) {
 	pruneSpeechLines(now)
 	if speechCount(7, "2026-10-17") != 0 || speechCount(7, "2026-10-19") != 1 {
 		t.Fatalf("drawn old day should go, recent stays: %d %d", speechCount(7, "2026-10-17"), speechCount(7, "2026-10-19"))
+	}
+}
+
+func TestSpeechWorth(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+		ok   bool
+	}{
+		{"1", "", false},
+		{"12345", "", false},
+		{"哈哈哈哈", "", false},
+		{"。。。", "", false},
+		{"好的", "", false},
+		{"今天天气不错！", "今天天气不错", true},
+		{"Hello, World", "helloworld", true},
+		{"gpt5 好用", "gpt5好用", true},
+	}
+	for _, c := range cases {
+		got, ok := speechWorth(c.in, 3)
+		if got != c.want || ok != c.ok {
+			t.Errorf("speechWorth(%q) = %q %v, want %q %v", c.in, got, ok, c.want, c.ok)
+		}
+	}
+}
+
+func TestSpeechSpamFilters(t *testing.T) {
+	openCommunityDB(t)
+	conf := defaultCommunityConfig()
+	if conf.MinChars != 3 || conf.Cooldown != 10 {
+		t.Fatalf("defaults %d %d", conf.MinChars, conf.Cooldown)
+	}
+	conf.Enabled = true
+	conf.ChatID = "-1001"
+	if err := saveCommunityConfig(conf); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 10, 23, 19, 28, 0, 0, shanghai)
+	ada := communityMessage{ChatID: -1001, UserID: 7, UserName: "ada", Text: "/join"}
+	applyCommunity(ada, now)
+	for i, text := range []string{"1", "2", "3", "4", "5"} {
+		ada.Text = text
+		recordSpeech(ada, now.Add(time.Duration(i)*time.Minute))
+	}
+	if n := speechCount(7, "2026-10-23"); n != 0 {
+		t.Fatalf("digit spam counted %d", n)
+	}
+	ada.Text = "今天天气不错"
+	recordSpeech(ada, now.Add(10*time.Minute))
+	ada.Text = "晚上一起打游戏吗"
+	recordSpeech(ada, now.Add(10*time.Minute+5*time.Second))
+	ada.Text = "今天天气不错！！"
+	recordSpeech(ada, now.Add(11*time.Minute))
+	ada.Text = "晚上一起打游戏吗"
+	if n := speechCount(7, "2026-10-23"); n != 1 {
+		t.Fatalf("punctuation dupe or fast line counted, got %d", n)
+	}
+	recordSpeech(ada, now.Add(12*time.Minute))
+	if n := speechCount(7, "2026-10-23"); n != 2 {
+		t.Fatalf("line after cooldown should count, got %d", n)
+	}
+	conf.Cooldown = -1
+	if err := saveCommunityConfig(conf); err == nil {
+		t.Fatal("negative cooldown should fail")
 	}
 }
