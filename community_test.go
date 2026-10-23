@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -23,63 +24,6 @@ func openCommunityDB(t *testing.T) {
 	})
 	if err := ensureSchema(); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestCommunityRedeem(t *testing.T) {
-	openCommunityDB(t)
-	conf := defaultCommunityConfig()
-	conf.Enabled = true
-	conf.ChatID = "-1001"
-	if err := saveCommunityConfig(conf); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := importCodes(100, "CDK-A\nCDK-B\nCDK-A\n"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := importCodes(50, "CDK-HALF"); err == nil {
-		t.Fatal("half yuan should be below the 10 point minimum")
-	}
-	now := time.Date(2026, 10, 18, 13, 0, 0, 0, shanghai)
-	reply, code := applyCommunity(communityMessage{ChatID: -1001, UserID: 7, UserName: "ada", Text: "/checkin gpt-image-2 10:41 ok"}, now)
-	if reply != "" || code != "" {
-		t.Fatalf("removed command reply %q code %q", reply, code)
-	}
-	if err := addPoints(7, "@ada", 1); err != nil {
-		t.Fatal(err)
-	}
-	redeem := communityMessage{ChatID: 7, UserID: 7, UserName: "ada", Text: "/redeem 1"}
-	reply, code = applyCommunity(redeem, now)
-	if code != "" || !strings.Contains(reply, "积分不够") {
-		t.Fatalf("early redeem %q code %q", reply, code)
-	}
-	if err := addPoints(7, "@ada", 9); err != nil {
-		t.Fatal(err)
-	}
-	groupRedeem := communityMessage{ChatID: -1001, UserID: 7, UserName: "ada", Text: "/redeem 1"}
-	reply, code = applyCommunity(groupRedeem, now.Add(time.Minute))
-	if code != "" || !strings.Contains(reply, "私聊") || pointBalance(7) != 10 {
-		t.Fatalf("group redeem %q code %q balance %d", reply, code, pointBalance(7))
-	}
-	oldSend := communitySend
-	var notices []string
-	communitySend = func(token, chatID, text string, markup json.RawMessage) error {
-		notices = append(notices, chatID+" "+text)
-		return nil
-	}
-	t.Cleanup(func() { communitySend = oldSend })
-	oldCfg := cfg
-	cfg.Telegram.BotToken = "token"
-	t.Cleanup(func() { cfg = oldCfg })
-	reply, code = applyCommunity(redeem, now.Add(2*time.Minute))
-	if code != "CDK-A" || strings.Contains(reply, "CDK-A") || !strings.Contains(reply, "1元") {
-		t.Fatalf("redeem reply %q code %q", reply, code)
-	}
-	if pointBalance(7) != 0 {
-		t.Fatalf("balance after redeem %d", pointBalance(7))
-	}
-	if len(notices) != 1 || !strings.Contains(notices[0], "-1001") || !strings.Contains(notices[0], "1元") || strings.Contains(notices[0], "CDK-A") {
-		t.Fatalf("group notice %#v", notices)
 	}
 }
 
@@ -243,6 +187,81 @@ func TestLotterySkipsSmallPool(t *testing.T) {
 	}
 }
 
+func TestLotteryDailyPlan(t *testing.T) {
+	openCommunityDB(t)
+	conf := defaultCommunityConfig()
+	conf.Enabled = true
+	conf.ChatID = "-1001"
+	conf.SpeechNeed = 1
+	conf.Winners = 5
+	conf.MinPool = 1
+	if err := saveCommunityConfig(conf); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := importPrizes("10元额度", "TEN-A\nTEN-B"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := importPrizes("30额度", "BIG-C"); err != nil {
+		t.Fatal(err)
+	}
+	id := func(code string) int64 {
+		var n int64
+		_ = db.QueryRow(`SELECT id FROM lottery_prizes WHERE code = ?`, code).Scan(&n)
+		return n
+	}
+	if _, err := planPrizes([]int64{id("BIG-C")}, "10-17"); err == nil {
+		t.Fatal("bad date should fail")
+	}
+	if n, err := planPrizes([]int64{id("BIG-C")}, "2026-10-17"); err != nil || n != 1 {
+		t.Fatalf("plan %d %v", n, err)
+	}
+	if _, err := planPrizes([]int64{id("TEN-B")}, "2026-10-20"); err != nil {
+		t.Fatal(err)
+	}
+	oldSend := communitySend
+	communitySend = func(token, chatID, text string, markup json.RawMessage) error { return nil }
+	t.Cleanup(func() { communitySend = oldSend })
+	oldCfg := cfg
+	cfg.Telegram.BotToken = "token"
+	t.Cleanup(func() { cfg = oldCfg })
+
+	speak := func(day time.Time, ids ...int64) {
+		for _, uid := range ids {
+			m := communityMessage{ChatID: -1001, UserID: uid, UserName: fmt.Sprintf("u%d", uid), Text: "/join"}
+			applyCommunity(m, day)
+			m.Text = "hi"
+			recordSpeech(m, day)
+		}
+	}
+	day1 := time.Date(2026, 10, 17, 12, 0, 0, 0, shanghai)
+	speak(day1, 7, 8, 9)
+	ada := communityMessage{ChatID: -1001, UserID: 7, UserName: "u7", Text: "/pool"}
+	if reply, _ := applyCommunity(ada, day1); !strings.Contains(reply, "次日抽 1 人") || !strings.Contains(reply, "30额度 × 1") || strings.Contains(reply, "10元额度") {
+		t.Fatalf("pool %q", reply)
+	}
+	settleDue(time.Date(2026, 10, 18, 0, 10, 0, 0, shanghai))
+	var used int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM lottery_prizes WHERE status = 'used'`).Scan(&used)
+	var bigDay string
+	_ = db.QueryRow(`SELECT day FROM lottery_prizes WHERE code = 'BIG-C' AND status = 'used'`).Scan(&bigDay)
+	if used != 1 || bigDay != "2026-10-17" {
+		t.Fatalf("planned day: used %d big day %q", used, bigDay)
+	}
+
+	day2 := day1.Add(24 * time.Hour)
+	speak(day2, 7, 8)
+	settleDue(time.Date(2026, 10, 19, 0, 10, 0, 0, shanghai))
+	var status string
+	_ = db.QueryRow(`SELECT status FROM lottery_prizes WHERE code = 'TEN-A'`).Scan(&status)
+	if status != "used" {
+		t.Fatalf("unplanned prize should go on an unplanned day, got %q", status)
+	}
+	_ = db.QueryRow(`SELECT status FROM lottery_prizes WHERE code = 'TEN-B'`).Scan(&status)
+	if status != "available" {
+		t.Fatal("prize reserved for 10-20 was handed out early")
+	}
+}
+
 func TestLotteryWaitsForStock(t *testing.T) {
 	openCommunityDB(t)
 	conf := defaultCommunityConfig()
@@ -275,35 +294,23 @@ func TestLotteryWaitsForStock(t *testing.T) {
 	}
 }
 
-func TestDeleteAvailableCodes(t *testing.T) {
+func TestOldCodesMoveToPrizes(t *testing.T) {
 	openCommunityDB(t)
-	conf := defaultCommunityConfig()
-	conf.MinPoints = 1
-	conf.RatePoints = 1
-	conf.RateYuan = "1"
-	if err := saveCommunityConfig(conf); err != nil {
+	if _, err := db.Exec(`INSERT INTO reward_codes (code, tier, amount_cents, status) VALUES ('OLD-1', '1元', 100, 'available'), ('OLD-2', '1元', 100, 'used')`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := importCodes(100, "CDK-A\nCDK-B\nCDK-C\n"); err != nil {
+	if err := ensureSchema(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`UPDATE reward_codes SET status = 'used' WHERE code = 'CDK-C'`); err != nil {
-		t.Fatal(err)
+	var name string
+	_ = db.QueryRow(`SELECT name FROM lottery_prizes WHERE code = 'OLD-1' AND status = 'available'`).Scan(&name)
+	if name != "1元" || prizeCount() != 1 {
+		t.Fatalf("name %q left %d", name, prizeCount())
 	}
-	removed, err := deleteAvailableCodes(nil, "CDK-A\nCDK-C\n", 0, false)
-	if err != nil || removed != 1 {
-		t.Fatalf("removed %d err %v", removed, err)
-	}
-	removed, err = deleteAvailableCodes(nil, "", 100, true)
-	if err != nil || removed != 1 {
-		t.Fatalf("amount removed %d err %v", removed, err)
-	}
-	var left int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM reward_codes`).Scan(&left); err != nil {
-		t.Fatal(err)
-	}
-	if left != 1 {
-		t.Fatalf("left %d", left)
+	var old int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM reward_codes`).Scan(&old)
+	if old != 1 {
+		t.Fatalf("old codes left %d, want only the used one", old)
 	}
 }
 

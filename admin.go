@@ -1329,11 +1329,6 @@ func apiAdmin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		adminCommunity(w, r)
-	case "community-codes":
-		if !requireAdmin(w, r) {
-			return
-		}
-		adminCommunityCodes(w, r)
 	case "community-prizes":
 		if !requireAdmin(w, r) {
 			return

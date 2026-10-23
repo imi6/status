@@ -20,7 +20,7 @@ func joinSpeech(msg communityMessage, now time.Time) (string, string) {
 	}
 	day := speechDay(now)
 	return fmt.Sprintf("%s 已报名，当前共 %d 人报名。今天 %d/%d 句，今日奖池 %d 人。每天满 %d 句进入抽奖池，次日随机抽 %d 人私信发奖。%s请先私聊机器人 /start。",
-		msg.displayName(), memberCount(), speechCount(msg.UserID, day), conf.SpeechNeed, poolSize(day, conf), conf.SpeechNeed, conf.Winners, minPoolText(conf)), ""
+		msg.displayName(), memberCount(), speechCount(msg.UserID, day), conf.SpeechNeed, poolSize(day, conf), conf.SpeechNeed, dayWinners(day, conf), minPoolText(conf)), ""
 }
 
 // minPoolText is empty when any pool size draws, so the default reads as before.
@@ -46,13 +46,13 @@ func poolSize(day string, conf CommunityConfig) int {
 func poolReply(msg communityMessage, now time.Time) string {
 	conf := loadCommunityConfig()
 	day := speechDay(now)
-	lines := []string{fmt.Sprintf("当前报名 %d 人，今日奖池 %d 人，次日抽 %d 人。%s", memberCount(), poolSize(day, conf), conf.Winners, minPoolText(conf))}
+	lines := []string{fmt.Sprintf("当前报名 %d 人，今日奖池 %d 人，次日抽 %d 人。%s", memberCount(), poolSize(day, conf), dayWinners(day, conf), minPoolText(conf))}
 	if speechMember(msg.UserID) {
 		lines = append(lines, fmt.Sprintf("%s 今天 %d/%d 句。", msg.displayName(), speechCount(msg.UserID, day), conf.SpeechNeed))
 	} else {
 		lines = append(lines, msg.displayName()+" 还没报名，发送 /join 参加。")
 	}
-	if items := prizeStock(); len(items) == 0 {
+	if items := prizeStockFor(day); len(items) == 0 {
 		lines = append(lines, "奖品还没准备好。")
 	} else {
 		parts := make([]string, 0, len(items))
@@ -106,8 +106,8 @@ func settleSpeechDay(day string, now time.Time) {
 		notifyGroup(fmt.Sprintf("%s 奖池 %d 人，未满 %d 人，今日不开奖。", day, len(pool), conf.MinPool))
 		return
 	}
-	want := min(conf.Winners, len(pool))
-	if left := prizeCount(); left < want {
+	want := min(dayWinners(day, conf), len(pool))
+	if left := prizeCountFor(day); left < want {
 		if left == 0 {
 			if stateGet("speech_wait:"+day) != "1" {
 				notifyGroup(fmt.Sprintf("%s 奖池 %d 人，但奖品库存为空，补货后再开奖。", day, len(pool)))
@@ -144,7 +144,8 @@ func grantPrize(userID int64, name, day string, now time.Time) (string, string, 
 	defer communityMu.Unlock()
 	var id int64
 	var prize, code string
-	if err := db.QueryRow(`SELECT id, name, code FROM lottery_prizes WHERE status = 'available' ORDER BY id LIMIT 1`).Scan(&id, &prize, &code); err != nil {
+	if err := db.QueryRow(`SELECT id, name, code FROM lottery_prizes WHERE status = 'available' AND `+prizeFilter(day)+`
+		ORDER BY plan_day, id LIMIT 1`, day).Scan(&id, &prize, &code); err != nil {
 		return "", "", err
 	}
 	mark, err := db.Exec(`UPDATE lottery_prizes SET status = 'used', winner_id = ?, winner_name = ?, day = ?, used_at = ? WHERE id = ? AND status = 'available'`,
@@ -157,9 +158,40 @@ func grantPrize(userID int64, name, day string, now time.Time) (string, string, 
 	return prize, code, nil
 }
 
+func plannedCount(day string) int {
+	var n int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM lottery_prizes WHERE status = 'available' AND plan_day = ?`, day).Scan(&n)
+	return n
+}
+
+// prizeFilter picks the prizes a day hands out. A day with a plan uses only its
+// own prizes. Otherwise it uses unplanned ones plus leftovers from past plans,
+// and prizes planned for other days stay reserved.
+func prizeFilter(day string) string {
+	if plannedCount(day) > 0 {
+		return `plan_day = ?`
+	}
+	return `(plan_day = '' OR plan_day < ?)`
+}
+
+// dayWinners is how many people a day's draw picks: one per planned prize, or
+// the configured count when nothing is planned.
+func dayWinners(day string, conf CommunityConfig) int {
+	if n := plannedCount(day); n > 0 {
+		return n
+	}
+	return conf.Winners
+}
+
 func prizeCount() int {
 	var n int
 	_ = db.QueryRow(`SELECT COUNT(*) FROM lottery_prizes WHERE status = 'available'`).Scan(&n)
+	return n
+}
+
+func prizeCountFor(day string) int {
+	var n int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM lottery_prizes WHERE status = 'available' AND `+prizeFilter(day), day).Scan(&n)
 	return n
 }
 
@@ -168,8 +200,9 @@ type prizeStockItem struct {
 	Count int    `json:"count"`
 }
 
-func prizeStock() []prizeStockItem {
-	rows, err := db.Query(`SELECT name, COUNT(*) FROM lottery_prizes WHERE status = 'available' GROUP BY name ORDER BY MIN(id)`)
+func prizeStockFor(day string) []prizeStockItem {
+	rows, err := db.Query(`SELECT name, COUNT(*) FROM lottery_prizes WHERE status = 'available' AND `+prizeFilter(day)+`
+		GROUP BY name ORDER BY MIN(id)`, day)
 	if err != nil {
 		return nil
 	}
@@ -185,24 +218,29 @@ func prizeStock() []prizeStockItem {
 }
 
 type prizeRow struct {
-	ID     int64  `json:"id"`
-	Name   string `json:"name"`
-	Code   string `json:"code"`
-	Status string `json:"status"`
-	Winner string `json:"winner"`
-	Day    string `json:"day"`
+	ID      int64  `json:"id"`
+	Name    string `json:"name"`
+	Code    string `json:"code"`
+	Status  string `json:"status"`
+	Winner  string `json:"winner"`
+	Day     string `json:"day"`
+	PlanDay string `json:"planDay"`
 }
 
+// listPrizes puts unsent prizes first in the order they go out: planned days
+// earliest first, then unplanned by import order. Sent prizes follow, newest first.
 func listPrizes(limit int) []prizeRow {
 	out := []prizeRow{}
-	rows, err := db.Query(`SELECT id, name, code, status, winner_name, day FROM lottery_prizes ORDER BY status = 'used', id DESC LIMIT ?`, limit)
+	rows, err := db.Query(`SELECT id, name, code, status, winner_name, day, plan_day FROM lottery_prizes
+		ORDER BY status = 'used', plan_day = '', plan_day,
+		CASE WHEN status = 'used' THEN -used_at ELSE id END LIMIT ?`, limit)
 	if err != nil {
 		return out
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var item prizeRow
-		if rows.Scan(&item.ID, &item.Name, &item.Code, &item.Status, &item.Winner, &item.Day) == nil {
+		if rows.Scan(&item.ID, &item.Name, &item.Code, &item.Status, &item.Winner, &item.Day, &item.PlanDay) == nil {
 			out = append(out, item)
 		}
 	}
@@ -242,8 +280,43 @@ func deletePrizes(ids []int64) int {
 	return removed
 }
 
+// planPrizes reserves unsent prizes for one speech day; an empty day clears the plan.
+func planPrizes(ids []int64, day string) (int, error) {
+	day = strings.TrimSpace(day)
+	if day != "" {
+		if _, err := time.ParseInLocation("2006-01-02", day, shanghai); err != nil {
+			return 0, errors.New("日期格式应为 2026-10-23")
+		}
+	}
+	changed := 0
+	for _, id := range ids {
+		res, err := db.Exec(`UPDATE lottery_prizes SET plan_day = ? WHERE id = ? AND status = 'available'`, day, id)
+		if err == nil {
+			changed += int(rowsOf(res))
+		}
+	}
+	if changed == 0 {
+		return 0, errors.New("请先勾选未发出的奖品")
+	}
+	return changed, nil
+}
+
 func adminCommunityPrizes(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
+	case http.MethodPut:
+		var body struct {
+			IDs []int64 `json:"ids"`
+			Day string  `json:"day"`
+		}
+		if !decodeBody(w, r, &body) {
+			return
+		}
+		changed, err := planPrizes(body.IDs, body.Day)
+		if err != nil {
+			writeAdminJSON(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
+		writeAdminJSON(w, 200, map[string]any{"ok": true, "changed": changed})
 	case http.MethodPost:
 		var body struct {
 			Name  string `json:"name"`

@@ -12,7 +12,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 )
 
 var shanghai = time.FixedZone("UTC+8", 8*3600)
@@ -20,10 +19,6 @@ var shanghai = time.FixedZone("UTC+8", 8*3600)
 type CommunityConfig struct {
 	Enabled    bool   `json:"enabled"`
 	ChatID     string `json:"chatID"`
-	RatePoints int    `json:"ratePoints"`
-	RateYuan   string `json:"rateYuan"`
-	RateCents  int    `json:"rateCents"`
-	MinPoints  int    `json:"minPoints"`
 	SpeechNeed int    `json:"speechNeed"`
 	Winners    int    `json:"winners"`
 	MinPool    int    `json:"minPool"`
@@ -32,7 +27,6 @@ type CommunityConfig struct {
 
 func defaultCommunityConfig() CommunityConfig {
 	return CommunityConfig{
-		RatePoints: 10, RateYuan: "1", RateCents: 100, MinPoints: 10,
 		SpeechNeed: 5, Winners: 1, MinPool: 100, CleanLines: true,
 	}
 }
@@ -111,6 +105,10 @@ func ensureCommunityTables() error {
 	_, _ = db.Exec(`ALTER TABLE reward_logs ADD COLUMN points INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE reward_codes ADD COLUMN amount_cents INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE daily_speech_lines ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE lottery_prizes ADD COLUMN plan_day TEXT NOT NULL DEFAULT ''`)
+	// Unsent codes from the retired points and fixed-reward flows join the lottery prizes.
+	_, _ = db.Exec(`INSERT OR IGNORE INTO lottery_prizes (name, code) SELECT tier, code FROM reward_codes WHERE status = 'available'`)
+	_, _ = db.Exec(`DELETE FROM reward_codes WHERE status = 'available' AND code IN (SELECT code FROM lottery_prizes)`)
 	return nil
 }
 
@@ -123,18 +121,6 @@ func loadCommunityConfig() CommunityConfig {
 	}
 	_ = json.Unmarshal([]byte(raw), &cfg)
 	def := defaultCommunityConfig()
-	if cfg.RatePoints <= 0 {
-		cfg.RatePoints = def.RatePoints
-	}
-	if cfg.RateCents <= 0 {
-		cfg.RateCents = def.RateCents
-	}
-	if strings.TrimSpace(cfg.RateYuan) == "" {
-		cfg.RateYuan = formatYuan(cfg.RateCents)
-	}
-	if cfg.MinPoints <= 0 {
-		cfg.MinPoints = def.MinPoints
-	}
 	if cfg.SpeechNeed <= 0 {
 		cfg.SpeechNeed = def.SpeechNeed
 	}
@@ -148,22 +134,6 @@ func loadCommunityConfig() CommunityConfig {
 }
 
 func saveCommunityConfig(c CommunityConfig) error {
-	if c.RatePoints < 1 || c.RatePoints > 10000 {
-		return errors.New("兑换积分需在 1 到 10000")
-	}
-	if c.MinPoints < 1 || c.MinPoints > 10000 {
-		return errors.New("最低兑换积分需在 1 到 10000")
-	}
-	cents, err := parseYuan(c.RateYuan)
-	if err != nil {
-		return errors.New("兑换额度需在 0.01 到 10000 元")
-	}
-	c.RateCents = cents
-	c.RateYuan = formatYuan(cents)
-	probe := c
-	if costForCents(cents, probe) < c.MinPoints {
-		return errors.New("按这个比例，这份额度不到最低兑换积分")
-	}
 	if c.SpeechNeed < 1 || c.SpeechNeed > 1000 {
 		return errors.New("每日发言条数需在 1 到 1000")
 	}
@@ -234,10 +204,6 @@ func applyCommunity(msg communityMessage, now time.Time) (string, string) {
 	switch name {
 	case "help", "start":
 		return communityHelp(), ""
-	case "points":
-		return pointsReply(msg, conf), ""
-	case "redeem":
-		return "兑换只能私聊机器人进行。请先私聊机器人发送 /start，再发送 /redeem 1。", ""
 	case "code":
 		return resendOwnCode(msg)
 	case "join":
@@ -256,13 +222,6 @@ func applyPrivate(msg communityMessage, name, rest string, now time.Time) (strin
 	switch name {
 	case "start", "help":
 		return communityHelp(), ""
-	case "points":
-		return pointsReply(msg, conf), ""
-	case "redeem":
-		if !conf.Enabled {
-			return "群活动还没开启。", ""
-		}
-		return redeemPoints(msg, rest, conf, now)
 	case "code":
 		return resendOwnCode(msg)
 	case "join":
@@ -275,7 +234,7 @@ func applyPrivate(msg communityMessage, name, rest string, now time.Time) (strin
 	case "pool":
 		return poolReply(msg, now), ""
 	default:
-		return "发送 /join 参加每日抽奖。积分兑换请发送 /redeem 1。", ""
+		return "发送 /join 参加每日抽奖，/pool 查看今天奖池。", ""
 	}
 }
 
@@ -288,8 +247,6 @@ func communityHelp() string {
 		"/join   报名参加",
 		"/leave   退出，之后不再计数",
 		"/pool   查看今天奖池和奖品",
-		"/points   查看积分",
-		"/redeem 1   只能私聊用积分兑换",
 		"/code   没收到兑换码时再要一次",
 	}, "\n")
 }
@@ -311,158 +268,12 @@ func splitCommand(text string) (string, string) {
 	return name, rest
 }
 
-func redeemPoints(msg communityMessage, rest string, conf CommunityConfig, now time.Time) (string, string) {
-	if strings.TrimSpace(rest) == "" {
-		return redeemMenu(conf), ""
-	}
-	cents, err := parseYuan(rest)
-	if err != nil {
-		return "格式：/redeem 1。发送 /redeem 可以查看现有额度和所需积分。", ""
-	}
-	cost := costForCents(cents, conf)
-	if cost < conf.MinPoints {
-		return fmt.Sprintf("%s元需要 %d 积分，低于最低 %d 积分，不能兑换。", formatYuan(cents), cost, conf.MinPoints), ""
-	}
-	label := formatYuan(cents) + "元"
-	communityMu.Lock()
-	defer communityMu.Unlock()
-	res, err := db.Exec(`UPDATE point_accounts SET balance = balance - ?, user_name = ? WHERE user_id = ? AND balance >= ?`,
-		cost, msg.displayName(), msg.UserID, cost)
-	if err != nil {
-		return "兑换暂时失败，请稍后再试。", ""
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Sprintf("积分不够。当前 %d，%s需要 %d。最低 %d 积分起兑。", pointBalance(msg.UserID), label, cost, conf.MinPoints), ""
-	}
-	code, codeID, err := takeCode(cents)
-	if err != nil {
-		_ = addPoints(msg.UserID, msg.displayName(), cost)
-		return "这个额度的兑换码暂时没有了，积分已退回。发送 /redeem 可查看现有额度。", ""
-	}
-	mark, err := db.Exec(`UPDATE reward_codes SET status = 'used', used_by = ?, used_name = ?, activity = 'redeem', used_at = ? WHERE id = ? AND status = 'available'`,
-		strconv.FormatInt(msg.UserID, 10), msg.displayName(), now.Unix(), codeID)
-	if err != nil || rowsOf(mark) == 0 {
-		_ = addPoints(msg.UserID, msg.displayName(), cost)
-		return "这个额度的兑换码暂时没有了，积分已退回。", ""
-	}
-	_, _ = db.Exec(`INSERT INTO reward_logs (activity, tier, user_id, user_name, text, created_at, code_id, points) VALUES ('redeem', ?, ?, ?, ?, ?, ?, ?)`,
-		label, msg.UserID, msg.displayName(), "/redeem "+label, now.Unix(), codeID, -cost)
-	notifyGroup(fmt.Sprintf("%s 用 %d 积分兑换了 %s CDK。", msg.displayName(), cost, label))
-	return fmt.Sprintf("已用 %d 积分兑换 %s CDK，兑换码在下一条消息。当前积分 %d。", cost, label, pointBalance(msg.UserID)), code
-}
-
 func rowsOf(res interface{ RowsAffected() (int64, error) }) int64 {
 	if res == nil {
 		return 0
 	}
 	n, _ := res.RowsAffected()
 	return n
-}
-
-func redeemMenu(conf CommunityConfig) string {
-	lines := []string{rateText(conf)}
-	items := codeStock()
-	if len(items) == 0 {
-		lines = append(lines, "当前没有可兑换的 CDK。")
-	} else {
-		lines = append(lines, "可兑换：")
-		for _, item := range items {
-			lines = append(lines, fmt.Sprintf("%s元  %d积分  剩余%d", item.Yuan, item.Points, item.Count))
-		}
-	}
-	lines = append(lines, "例如发送 /redeem 1")
-	return strings.Join(lines, "\n")
-}
-
-func pointsReply(msg communityMessage, conf CommunityConfig) string {
-	return fmt.Sprintf("%s 当前积分 %d。\n%s\n发送 /redeem 查看可换的额度。",
-		msg.displayName(), pointBalance(msg.UserID), rateText(conf))
-}
-
-func rateText(conf CommunityConfig) string {
-	return fmt.Sprintf("兑换比例：%d 积分 = %s 元。最低 %d 积分起兑。", conf.RatePoints, formatYuan(conf.RateCents), conf.MinPoints)
-}
-
-func costForCents(cents int, conf CommunityConfig) int {
-	if cents <= 0 || conf.RatePoints <= 0 || conf.RateCents <= 0 {
-		return 0
-	}
-	return (cents*conf.RatePoints + conf.RateCents - 1) / conf.RateCents
-}
-
-func parseYuan(raw string) (int, error) {
-	s := strings.TrimSpace(raw)
-	s = strings.TrimSuffix(s, "元")
-	s = strings.TrimSuffix(strings.ToLower(s), "r")
-	s = strings.TrimSpace(s)
-	if s == "" || strings.HasPrefix(s, "-") || strings.HasPrefix(s, "+") {
-		return 0, errors.New("额度格式不正确")
-	}
-	parts := strings.Split(s, ".")
-	if len(parts) > 2 || parts[0] == "" {
-		return 0, errors.New("额度格式不正确")
-	}
-	yuan, err := strconv.Atoi(parts[0])
-	if err != nil || yuan < 0 || yuan > 10000 {
-		return 0, errors.New("额度格式不正确")
-	}
-	frac := 0
-	if len(parts) == 2 {
-		digits := parts[1]
-		if digits == "" || len(digits) > 2 {
-			return 0, errors.New("额度最多两位小数")
-		}
-		if len(digits) == 1 {
-			digits += "0"
-		}
-		frac, err = strconv.Atoi(digits)
-		if err != nil {
-			return 0, errors.New("额度格式不正确")
-		}
-	}
-	total := yuan*100 + frac
-	if total <= 0 || total > 10000*100 {
-		return 0, errors.New("额度需在 0.01 到 10000 元")
-	}
-	return total, nil
-}
-
-func formatYuan(cents int) string {
-	if cents < 0 {
-		cents = 0
-	}
-	yuan := cents / 100
-	frac := cents % 100
-	if frac == 0 {
-		return strconv.Itoa(yuan)
-	}
-	if frac%10 == 0 {
-		return fmt.Sprintf("%d.%d", yuan, frac/10)
-	}
-	return fmt.Sprintf("%d.%02d", yuan, frac)
-}
-
-func addPoints(userID int64, name string, delta int) error {
-	_, err := db.Exec(`INSERT INTO point_accounts (user_id, user_name, balance) VALUES (?, ?, ?)
-		ON CONFLICT(user_id) DO UPDATE SET balance = balance + excluded.balance, user_name = excluded.user_name`,
-		userID, name, delta)
-	return err
-}
-
-func pointBalance(userID int64) int {
-	var n int
-	_ = db.QueryRow(`SELECT balance FROM point_accounts WHERE user_id = ?`, userID).Scan(&n)
-	return n
-}
-
-func takeCode(cents int) (string, int64, error) {
-	var id int64
-	var code string
-	err := db.QueryRow(`SELECT id, code FROM reward_codes WHERE amount_cents = ? AND status = 'available' ORDER BY id LIMIT 1`, cents).Scan(&id, &code)
-	if err != nil {
-		return "", 0, err
-	}
-	return code, id, nil
 }
 
 func resendOwnCode(msg communityMessage) (string, string) {
@@ -475,37 +286,6 @@ func resendOwnCode(msg communityMessage) (string, string) {
 		return "还没有可发送的兑换码。", ""
 	}
 	return "兑换码已再私聊发送一次。如果仍收不到，请先发送 /start。", code
-}
-
-func activityLabel(activity string) string {
-	switch activity {
-	case "checkin":
-		return "打卡"
-	case "recipe":
-		return "配方"
-	case "fail":
-		return "翻车"
-	case "correct":
-		return "纠错"
-	case "pair":
-		return "组队"
-	case "relay":
-		return "接力"
-	case "vote":
-		return "站队"
-	case "ask":
-		return "提问"
-	case "answer":
-		return "回答"
-	case "redeem":
-		return "兑换"
-	case "speech":
-		return "每日发言"
-	case "lottery":
-		return "每日抽奖"
-	default:
-		return activity
-	}
 }
 
 func stateGet(key string) string {
@@ -553,136 +333,8 @@ func notifyGroup(text string) {
 	_ = communitySend(token, chat, text, nil)
 }
 
-func importCodes(cents int, raw string) (int, error) {
-	if cents <= 0 {
-		return 0, errors.New("额度不正确")
-	}
-	conf := loadCommunityConfig()
-	cost := costForCents(cents, conf)
-	if cost < conf.MinPoints {
-		return 0, fmt.Errorf("%s元按当前比例需要 %d 积分，低于最低 %d 积分", formatYuan(cents), cost, conf.MinPoints)
-	}
-	added := 0
-	for _, line := range strings.Split(raw, "\n") {
-		code := strings.TrimSpace(line)
-		if code == "" {
-			continue
-		}
-		if utf8.RuneCountInString(code) < 4 || utf8.RuneCountInString(code) > 80 {
-			continue
-		}
-		res, err := db.Exec(`INSERT INTO reward_codes (code, tier, amount_cents, status) VALUES (?, ?, ?, 'available')`, code, formatYuan(cents)+"元", cents)
-		if err != nil {
-			continue
-		}
-		if n, _ := res.RowsAffected(); n > 0 {
-			added++
-		}
-	}
-	if added == 0 {
-		return 0, errors.New("没有导入新的兑换码")
-	}
-	return added, nil
-}
-
-func listAvailableCodes(limit int) []availableCode {
-	if limit <= 0 {
-		limit = 300
-	}
-	rows, err := db.Query(`SELECT id, code, amount_cents FROM reward_codes WHERE status = 'available' ORDER BY amount_cents, id LIMIT ?`, limit)
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-	var out []availableCode
-	for rows.Next() {
-		var item availableCode
-		var cents int
-		if rows.Scan(&item.ID, &item.Code, &cents) != nil {
-			continue
-		}
-		item.Yuan = formatYuan(cents)
-		out = append(out, item)
-	}
-	return out
-}
-
-func deleteAvailableCodes(ids []int64, raw string, cents int, allOfAmount bool) (int, error) {
-	removed := 0
-	drop := func(res interface{ RowsAffected() (int64, error) }, err error) {
-		if err != nil {
-			return
-		}
-		if n, _ := res.RowsAffected(); n > 0 {
-			removed += int(n)
-		}
-	}
-	if allOfAmount {
-		if cents <= 0 {
-			return 0, errors.New("请先填写额度")
-		}
-		res, err := db.Exec(`DELETE FROM reward_codes WHERE status = 'available' AND amount_cents = ?`, cents)
-		drop(res, err)
-	}
-	for _, id := range ids {
-		if id <= 0 {
-			continue
-		}
-		res, err := db.Exec(`DELETE FROM reward_codes WHERE id = ? AND status = 'available'`, id)
-		drop(res, err)
-	}
-	for _, line := range strings.Split(raw, "\n") {
-		code := strings.TrimSpace(line)
-		if code == "" {
-			continue
-		}
-		res, err := db.Exec(`DELETE FROM reward_codes WHERE code = ? AND status = 'available'`, code)
-		drop(res, err)
-	}
-	if removed == 0 {
-		return 0, errors.New("没有可删除的未使用兑换码")
-	}
-	return removed, nil
-}
-
-type availableCode struct {
-	ID   int64  `json:"id"`
-	Code string `json:"code"`
-	Yuan string `json:"yuan"`
-}
-
-type codeStockItem struct {
-	Yuan   string `json:"yuan"`
-	Cents  int    `json:"cents"`
-	Count  int    `json:"count"`
-	Points int    `json:"points"`
-}
-
-func codeStock() []codeStockItem {
-	conf := loadCommunityConfig()
-	rows, err := db.Query(`SELECT amount_cents, COUNT(*) FROM reward_codes WHERE status = 'available' AND amount_cents > 0 GROUP BY amount_cents ORDER BY amount_cents`)
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-	var out []codeStockItem
-	for rows.Next() {
-		var cents, n int
-		if rows.Scan(&cents, &n) != nil {
-			continue
-		}
-		out = append(out, codeStockItem{
-			Yuan:   formatYuan(cents),
-			Cents:  cents,
-			Count:  n,
-			Points: costForCents(cents, conf),
-		})
-	}
-	return out
-}
-
 func recentRewards(limit int) []tgLogLine {
-	rows, err := db.Query(`SELECT created_at, user_name, activity, tier, points FROM reward_logs ORDER BY id DESC LIMIT ?`, limit)
+	rows, err := db.Query(`SELECT created_at, user_name, activity, tier FROM reward_logs WHERE activity IN ('lottery', 'speech') ORDER BY id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil
 	}
@@ -691,20 +343,16 @@ func recentRewards(limit int) []tgLogLine {
 	for rows.Next() {
 		var ts int64
 		var name, activity, tier string
-		var points int
-		if rows.Scan(&ts, &name, &activity, &tier, &points) != nil {
+		if rows.Scan(&ts, &name, &activity, &tier) != nil {
 			continue
 		}
-		text := name + " · " + activityLabel(activity) + " · +" + strconv.Itoa(points) + " 积分"
-		if activity == "redeem" {
-			text = name + " · 兑换" + tier + " · " + strconv.Itoa(points) + " 积分"
-		}
-		if activity == "speech" || activity == "lottery" {
-			text = name + " · " + activityLabel(activity) + " · " + tier
+		label := "每日抽奖"
+		if activity == "speech" {
+			label = "每日发言"
 		}
 		out = append(out, tgLogLine{
 			Time: time.Unix(ts, 0).In(shanghai).Format("01-02 15:04"),
-			Text: text,
+			Text: name + " · " + label + " · " + tier,
 		})
 	}
 	return out
@@ -715,14 +363,13 @@ func adminCommunity(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		writeAdminJSON(w, 200, map[string]any{
 			"config":    loadCommunityConfig(),
-			"stock":     codeStock(),
-			"codes":     listAvailableCodes(300),
 			"logs":      recentRewards(40),
 			"speech":    speechToday(time.Now()),
 			"dashboard": speechDashboard(time.Now()),
 			"prizes":    listPrizes(300),
 			"prizeLeft": prizeCount(),
 			"lineCount": speechLineCount(),
+			"today":     speechDay(time.Now()),
 		})
 	case http.MethodPut:
 		var body CommunityConfig
@@ -734,57 +381,6 @@ func adminCommunity(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeAdminJSON(w, 200, map[string]bool{"ok": true})
-	default:
-		writeAdminJSON(w, 405, map[string]string{"error": "method not allowed"})
-	}
-}
-
-func adminCommunityCodes(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodPost:
-		var body struct {
-			Amount string `json:"amount"`
-			Codes  string `json:"codes"`
-		}
-		if !decodeBody(w, r, &body) {
-			return
-		}
-		cents, err := parseYuan(body.Amount)
-		if err != nil {
-			writeAdminJSON(w, 400, map[string]string{"error": "额度格式不正确，例如 1 或 5"})
-			return
-		}
-		added, err := importCodes(cents, body.Codes)
-		if err != nil {
-			writeAdminJSON(w, 400, map[string]string{"error": err.Error()})
-			return
-		}
-		writeAdminJSON(w, 200, map[string]any{"ok": true, "added": added})
-	case http.MethodDelete:
-		var body struct {
-			IDs    []int64 `json:"ids"`
-			Codes  string  `json:"codes"`
-			Amount string  `json:"amount"`
-			All    bool    `json:"all"`
-		}
-		if !decodeBody(w, r, &body) {
-			return
-		}
-		cents := 0
-		if body.All {
-			var err error
-			cents, err = parseYuan(body.Amount)
-			if err != nil {
-				writeAdminJSON(w, 400, map[string]string{"error": "额度格式不正确，例如 1 或 5"})
-				return
-			}
-		}
-		removed, err := deleteAvailableCodes(body.IDs, body.Codes, cents, body.All)
-		if err != nil {
-			writeAdminJSON(w, 400, map[string]string{"error": err.Error()})
-			return
-		}
-		writeAdminJSON(w, 200, map[string]any{"ok": true, "removed": removed})
 	default:
 		writeAdminJSON(w, 405, map[string]string{"error": "method not allowed"})
 	}
@@ -883,7 +479,7 @@ func speechDashboard(now time.Time) speechDash {
 	today := speechToday(now)
 	out := speechDash{
 		Members: today.Members, Speakers: today.Speakers, Qualified: today.Qualified,
-		Need: conf.SpeechNeed, Winners: conf.Winners, MinPool: conf.MinPool,
+		Need: conf.SpeechNeed, Winners: dayWinners(speechDay(now), conf), MinPool: conf.MinPool,
 		Days: []dashDay{},
 	}
 	day := speechDay(now)

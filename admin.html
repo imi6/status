@@ -291,12 +291,22 @@ table.grid-table tbody tr.active{background:var(--panel-2)}
           <label>每天中奖人数<input name="winners" type="number" min="1" max="1000" value="1"></label>
           <label>最少奖池人数<input name="minPool" type="number" min="1" max="100000" value="100" title="奖池不满这个人数，当天不开奖。填 1 表示有人就开奖"></label>
           <label class="check"><input name="cleanLines" type="checkbox" checked>自动清理 48 小时前的聊天和发言次数</label>
-          <label>多少积分<input name="ratePoints" type="number" min="1" max="10000" value="10"></label>
-          <label>等于多少元额度<input name="rateYuan" inputmode="decimal" value="1" placeholder="1"></label>
-          <label>最低兑换积分<input name="minPoints" type="number" min="1" max="10000" value="10"></label>
         </div>
         <div class="row-actions"><button type="submit">保存活动设置</button></div>
       </form>
+    </section>
+    <section class="card">
+      <h2>每日奖品</h2>
+      <p class="hint">选一个日期，勾选当天要发的 CDK。日期指发言的那天，次日 0 点开奖。设置了奖品的日子按勾选的个数抽人，不看“每天中奖人数”；当天没抽完的会退回通用奖品。没设置的日子按添加顺序发未安排的奖品。</p>
+      <div class="grid">
+        <label>日期<input id="planDay" type="date"></label>
+      </div>
+      <p class="hint" id="planSummary">读取中…</p>
+      <div id="planList"></div>
+      <div class="row-actions">
+        <button type="button" id="planSave">保存当天奖品</button>
+        <button type="button" class="ghost" id="planClear">清空当天安排</button>
+      </div>
     </section>
     <section class="card">
       <h2>抽奖奖品</h2>
@@ -310,36 +320,14 @@ table.grid-table tbody tr.active{background:var(--panel-2)}
       </form>
       <div class="table-wrap">
         <table class="grid-table" id="prizeTable">
-          <thead><tr><th></th><th>奖品</th><th>CDK</th><th>状态</th><th>中奖人</th><th>日期</th></tr></thead>
+          <thead><tr><th></th><th>奖品</th><th>CDK</th><th>状态</th><th>安排日期</th><th>中奖人</th><th>日期</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
       <div class="row-actions"><button type="button" class="warn" id="prizeDelete">删除选中的未发出奖品</button></div>
     </section>
     <section class="card">
-      <h2>积分兑换 CDK</h2>
-      <form id="cdkForm">
-        <div class="grid">
-          <label>额度（元）<input name="amount" inputmode="decimal" required value="1" placeholder="1"></label>
-          <label class="wide">兑换码<textarea name="codes" required placeholder="每行一个"></textarea></label>
-        </div>
-        <p class="hint" id="cdkStock">库存读取中…</p>
-        <div class="row-actions"><button type="submit">导入</button></div>
-      </form>
-      <form id="cdkDeleteForm">
-        <div class="grid">
-          <label class="wide">批量删除<textarea name="codes" placeholder="每行一个，只删除还没发出去的"></textarea></label>
-        </div>
-        <div id="cdkList"></div>
-        <div class="row-actions">
-          <button type="button" class="ghost" id="cdkSelectAll">全选</button>
-          <button type="submit" class="warn">删除选中和文本中的码</button>
-          <button type="button" class="warn" id="cdkDeleteAmount">删除当前额度的未使用码</button>
-        </div>
-      </form>
-    </section>
-    <section class="card">
-      <h2>最近积分</h2>
+      <h2>最近中奖</h2>
       <pre id="communityLog" class="logbox">正在读取…</pre>
     </section>
     </div>
@@ -1141,6 +1129,7 @@ $('reloadDash').addEventListener('click', () => loadCommunity());
 async function loadCommunity(){
   try {
     const data = await api('/api/admin/community');
+    if (!$('planDay').value && data.today) $('planDay').value = data.today;
     const f = $('communityForm');
     const cfg = data.config || {};
     f.enabled.checked = !!cfg.enabled;
@@ -1151,27 +1140,9 @@ async function loadCommunity(){
     f.cleanLines.checked = cfg.cleanLines !== false;
     $('lineCount').textContent = '聊天内容和每人发言次数只在后台记录，不在这里展示。当前保存 ' + (data.lineCount || 0) + ' 条。';
     renderPrizes(data.prizes || [], data.prizeLeft || 0);
-    f.ratePoints.value = cfg.ratePoints || 10;
-    f.rateYuan.value = cfg.rateYuan || '1';
-    f.minPoints.value = cfg.minPoints || 10;
-    const stock = data.stock || [];
-    const speech = data.speech || {};
-    $('cdkStock').textContent = (stock.length ? ('库存 ' + stock.map(item => item.yuan + '元 × ' + item.count + '（' + item.points + '积分）').join(' · ')) : '暂无 CDK。') + ' 报名 ' + (speech.members || 0) + '，今日已发言 ' + (speech.speakers || 0) + '，今日奖池 ' + (speech.qualified || 0) + '。';
     renderSpeechDash(data.dashboard);
-    const codes = data.codes || [];
-    const list = $('cdkList');
-    list.replaceChildren();
-    codes.forEach(item => {
-      const label = document.createElement('label');
-      label.className = 'check';
-      const input = document.createElement('input');
-      input.type = 'checkbox';
-      input.value = String(item.id);
-      label.append(input, ' ' + item.yuan + '元 ' + item.code);
-      list.append(label);
-    });
     const logs = data.logs || [];
-    $('communityLog').textContent = logs.length ? logs.map(item => item.time + '  ' + item.text).join('\n') : '还没有积分记录。';
+    $('communityLog').textContent = logs.length ? logs.map(item => item.time + '  ' + item.text).join('\n') : '还没有中奖记录。';
   } catch (err) {
     $('communityLog').textContent = err.message;
   }
@@ -1186,10 +1157,7 @@ $('communityForm').addEventListener('submit', async (e) => {
       speechNeed: Number(f.speechNeed.value || 5),
       winners: Number(f.winners.value || 1),
       minPool: Number(f.minPool.value || 100),
-      cleanLines: f.cleanLines.checked,
-      ratePoints: Number(f.ratePoints.value || 10),
-      rateYuan: String(f.rateYuan.value || '1').trim(),
-      minPoints: Number(f.minPoints.value || 10)
+      cleanLines: f.cleanLines.checked
     }});
     showMsg('活动设置已保存。', false);
     loadCommunity();
@@ -1207,10 +1175,64 @@ function renderPrizes(prizes, left){
       input.setAttribute('aria-label', '选择 ' + item.name + ' ' + item.code);
       pick.append(input);
     }
-    tr.append(pick, cell(item.name, 'wrap'), cell(item.code, 'wrap'), cell(item.status === 'used' ? '已发出' : '待抽', 'num'), cell(item.winner || '', 'num'), cell(item.day || '', 'num'));
+    tr.append(pick, cell(item.name, 'wrap'), cell(item.code, 'wrap'), cell(item.status === 'used' ? '已发出' : '待抽', 'num'), cell(item.status === 'used' ? '' : (item.planDay || '未安排'), 'num'), cell(item.winner || '', 'num'), cell(item.day || '', 'num'));
     return tr;
   });
+  planPrizesCache = prizes.filter(item => item.status === 'available');
+  renderPlan();
 }
+let planPrizesCache = [];
+function shortCode(code){
+  return code.length > 12 ? code.slice(0, 6) + '…' + code.slice(-4) : code;
+}
+function renderPlan(){
+  const day = $('planDay').value;
+  const days = {};
+  planPrizesCache.forEach(item => {
+    if (!item.planDay) return;
+    const names = days[item.planDay] = days[item.planDay] || {};
+    names[item.name] = (names[item.name] || 0) + 1;
+  });
+  const keys = Object.keys(days).sort();
+  $('planSummary').textContent = keys.length
+    ? '已安排：' + keys.map(d => d + ' ' + Object.entries(days[d]).map(([n, c]) => n + ' × ' + c).join('、')).join('；')
+    : '还没有安排，所有日子都按添加顺序发奖。';
+  const list = $('planList');
+  list.replaceChildren();
+  if (!planPrizesCache.length) {
+    list.textContent = '没有未发出的奖品，请先在下方添加。';
+    return;
+  }
+  planPrizesCache.forEach(item => {
+    const label = document.createElement('label');
+    label.className = 'check';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.value = String(item.id);
+    input.checked = !!day && item.planDay === day;
+    const other = item.planDay && item.planDay !== day;
+    input.disabled = !!other;
+    label.append(input, ' ' + item.name + '  ' + shortCode(item.code) + (other ? '（已安排到 ' + item.planDay + '）' : ''));
+    list.append(label);
+  });
+}
+$('planDay').addEventListener('change', renderPlan);
+async function savePlan(keep){
+  const day = $('planDay').value;
+  if (!day) { showMsg('请先选择日期。', true); return; }
+  const boxes = [...$('planList').querySelectorAll('input:not(:disabled)')];
+  const picked = keep ? boxes.filter(input => input.checked).map(input => Number(input.value)) : [];
+  const drop = planPrizesCache.filter(item => item.planDay === day && !picked.includes(item.id)).map(item => item.id);
+  if (!picked.length && !drop.length) { showMsg(keep ? '请勾选当天要发的奖品。' : day + ' 没有安排。', true); return; }
+  try {
+    if (drop.length) await api('/api/admin/community-prizes', {method:'PUT', body:{ids:drop, day:''}});
+    if (picked.length) await api('/api/admin/community-prizes', {method:'PUT', body:{ids:picked, day}});
+    showMsg(picked.length ? (day + ' 安排了 ' + picked.length + ' 个奖品，开奖抽 ' + picked.length + ' 人。') : ('已清空 ' + day + ' 的安排。'), false);
+    loadCommunity();
+  } catch (err) { showMsg(err.message, true); }
+}
+$('planSave').addEventListener('click', () => savePlan(true));
+$('planClear').addEventListener('click', () => savePlan(false));
 $('prizeForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const f = e.target;
@@ -1228,46 +1250,6 @@ $('prizeDelete').addEventListener('click', async () => {
   try {
     const data = await api('/api/admin/community-prizes', {method:'DELETE', body:{ids}});
     showMsg('已删除 ' + (data.removed || 0) + ' 个奖品。', false);
-    loadCommunity();
-  } catch (err) { showMsg(err.message, true); }
-});
-$('cdkForm').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const f = e.target;
-  try {
-    const data = await api('/api/admin/community-codes', {method:'POST', body:{amount:f.amount.value, codes:f.codes.value}});
-    f.codes.value = '';
-    showMsg('已导入 ' + (data.added || 0) + ' 个兑换码。', false);
-    loadCommunity();
-  } catch (err) { showMsg(err.message, true); }
-});
-$('cdkDeleteForm').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const ids = [...$('cdkList').querySelectorAll('input:checked')].map(input => Number(input.value));
-  const codes = e.target.codes.value;
-  if (!ids.length && !codes.trim()) {
-    showMsg('请勾选兑换码，或在文本框里每行填一个。', true);
-    return;
-  }
-  if (!confirm('删除选中的未使用兑换码？已发出的不会删除。')) return;
-  try {
-    const data = await api('/api/admin/community-codes', {method:'DELETE', body:{ids, codes}});
-    e.target.codes.value = '';
-    showMsg('已删除 ' + (data.removed || 0) + ' 个兑换码。', false);
-    loadCommunity();
-  } catch (err) { showMsg(err.message, true); }
-});
-$('cdkSelectAll').addEventListener('click', () => {
-  const boxes = [...$('cdkList').querySelectorAll('input')];
-  const on = boxes.some(input => !input.checked);
-  boxes.forEach(input => { input.checked = on; });
-});
-$('cdkDeleteAmount').addEventListener('click', async () => {
-  const amount = $('cdkForm').amount.value;
-  if (!confirm('删除额度 ' + amount + ' 元的全部未使用兑换码？')) return;
-  try {
-    const data = await api('/api/admin/community-codes', {method:'DELETE', body:{all:true, amount}});
-    showMsg('已删除 ' + (data.removed || 0) + ' 个兑换码。', false);
     loadCommunity();
   } catch (err) { showMsg(err.message, true); }
 });
