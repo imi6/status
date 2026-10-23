@@ -282,7 +282,7 @@ table.grid-table tbody tr.active{background:var(--panel-2)}
     </section>
     <section class="card">
       <h2>群活动</h2>
-      <p class="hint">用户发送 /join 报名，报名长期有效。报名后当天发言满指定句数即进入当天抽奖池（重复内容、纯数字、字数太少、发得太快的不计），次日 0 点后从奖池随机抽取中奖人，私信发放下方奖品库里的 CDK，群里只公布中奖人和奖品名。奖池人数不满“最少奖池人数”时当天不开奖，填 1 表示有人就开奖。</p>
+      <p class="hint">用户发送 /join 报名，报名长期有效。报名后当天发言满指定句数即进入当天抽奖池（重复内容、纯数字、字数太少、发得太快的不计），次日 0 点后从奖池随机抽取中奖人，私信发放下方奖品库里的 CDK，群里只公布中奖人和奖品名。“最少奖池人数”是没单独设门槛的奖品用的默认门槛；想满 30 或 50 人也开奖，在下方奖品里给部分 CDK 设更低的门槛。</p>
       <form id="communityForm">
         <div class="grid">
           <label class="check"><input name="enabled" type="checkbox">开启群活动</label>
@@ -315,18 +315,24 @@ table.grid-table tbody tr.active{background:var(--panel-2)}
       <form id="prizeForm">
         <div class="grid">
           <label>奖品名称<input name="name" required maxlength="40" placeholder="例如 5元额度"></label>
-          <label class="wide">CDK<textarea name="codes" required placeholder="每行一个，同一批使用上面的名称"></textarea></label>
+          <label>开奖人数门槛<input name="need" type="number" min="0" max="100000" value="0" title="奖池满这么多人才会发这个奖品。0 表示用上面的最少奖池人数"></label>
+          <label class="wide">CDK<textarea name="codes" required placeholder="每行一个，同一批使用上面的名称和门槛"></textarea></label>
         </div>
+        <p class="hint">兜底规则：给不同 CDK 设不同门槛，例如 30额度 设 100、10元额度 设 50、1元 设 30。开奖时按奖池人数选能达到的最高一档，这一档和更低档的 CDK 都可以发，优先发高档的；一档都没达到就当天不开奖。</p>
         <p class="hint" id="prizeStock">奖品读取中…</p>
         <div class="row-actions"><button type="submit">添加奖品</button></div>
       </form>
       <div class="table-wrap">
         <table class="grid-table" id="prizeTable">
-          <thead><tr><th></th><th>奖品</th><th>CDK</th><th>状态</th><th>安排日期</th><th>中奖人</th><th>日期</th></tr></thead>
+          <thead><tr><th></th><th>奖品</th><th>CDK</th><th>状态</th><th>开奖门槛</th><th>安排日期</th><th>中奖人</th><th>日期</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
-      <div class="row-actions"><button type="button" class="warn" id="prizeDelete">删除选中的未发出奖品</button></div>
+      <div class="row-actions">
+        <label class="check">把选中的门槛改为 <input id="prizeNeed" type="number" min="0" max="100000" value="0" style="width:96px"> 人</label>
+        <button type="button" class="ghost" id="prizeNeedSave">修改门槛</button>
+        <button type="button" class="warn" id="prizeDelete">删除选中的未发出奖品</button>
+      </div>
     </section>
     <section class="card">
       <h2>最近中奖</h2>
@@ -1171,6 +1177,7 @@ $('communityForm').addEventListener('submit', async (e) => {
 });
 function renderPrizes(prizes, left){
   $('prizeStock').textContent = '未发出 ' + left + ' 个，共显示 ' + prizes.length + ' 条。库存不足时当天会等补货后再开奖。';
+  prizeMinPool = Number($('communityForm').minPool.value || 100);
   fillBody($('prizeTable'), prizes, item => {
     const tr = document.createElement('tr');
     const pick = document.createElement('td');
@@ -1181,13 +1188,14 @@ function renderPrizes(prizes, left){
       input.setAttribute('aria-label', '选择 ' + item.name + ' ' + item.code);
       pick.append(input);
     }
-    tr.append(pick, cell(item.name, 'wrap'), cell(item.code, 'wrap'), cell(item.status === 'used' ? '已发出' : '待抽', 'num'), cell(item.status === 'used' ? '' : (item.planDay || '未安排'), 'num'), cell(item.winner || '', 'num'), cell(item.day || '', 'num'));
+    tr.append(pick, cell(item.name, 'wrap'), cell(item.code, 'wrap'), cell(item.status === 'used' ? '已发出' : '待抽', 'num'), cell(item.status === 'used' ? '' : (item.need ? '满 ' + item.need + ' 人' : '默认 ' + prizeMinPool), 'num'), cell(item.status === 'used' ? '' : (item.planDay || '未安排'), 'num'), cell(item.winner || '', 'num'), cell(item.day || '', 'num'));
     return tr;
   });
   planPrizesCache = prizes.filter(item => item.status === 'available');
   renderPlan();
 }
 let planPrizesCache = [];
+let prizeMinPool = 100;
 function shortCode(code){
   return code.length > 12 ? code.slice(0, 6) + '…' + code.slice(-4) : code;
 }
@@ -1218,7 +1226,7 @@ function renderPlan(){
     input.checked = !!day && item.planDay === day;
     const other = item.planDay && item.planDay !== day;
     input.disabled = !!other;
-    label.append(input, ' ' + item.name + '  ' + shortCode(item.code) + (other ? '（已安排到 ' + item.planDay + '）' : ''));
+    label.append(input, ' ' + item.name + '  ' + shortCode(item.code) + '  满 ' + (item.need || prizeMinPool) + ' 人' + (other ? '（已安排到 ' + item.planDay + '）' : ''));
     list.append(label);
   });
 }
@@ -1243,9 +1251,19 @@ $('prizeForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const f = e.target;
   try {
-    const data = await api('/api/admin/community-prizes', {method:'POST', body:{name:f.name.value, codes:f.codes.value}});
+    const data = await api('/api/admin/community-prizes', {method:'POST', body:{name:f.name.value, codes:f.codes.value, need:Number(f.need.value || 0)}});
     f.codes.value = '';
     showMsg('已添加 ' + (data.added || 0) + ' 个奖品。', false);
+    loadCommunity();
+  } catch (err) { showMsg(err.message, true); }
+});
+$('prizeNeedSave').addEventListener('click', async () => {
+  const ids = [...$('prizeTable').querySelectorAll('input:checked')].map(input => Number(input.value));
+  if (!ids.length) { showMsg('请先勾选未发出的奖品。', true); return; }
+  const need = Number($('prizeNeed').value || 0);
+  try {
+    const data = await api('/api/admin/community-prizes', {method:'PUT', body:{ids, need}});
+    showMsg('已修改 ' + (data.changed || 0) + ' 个奖品的门槛为' + (need ? ' 满 ' + need + ' 人。' : '默认（最少奖池人数）。'), false);
     loadCommunity();
   } catch (err) { showMsg(err.message, true); }
 });

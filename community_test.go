@@ -39,10 +39,10 @@ func TestDailyLotteryDrawsFromQualifiedPool(t *testing.T) {
 	if err := saveCommunityConfig(conf); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := importPrizes("", "CDK-X"); err == nil {
+	if _, err := importPrizes("", "CDK-X", 0); err == nil {
 		t.Fatal("prize without name should fail")
 	}
-	if n, err := importPrizes("5元额度", "CDK-A\nCDK-B\nCDK-A\n"); err != nil || n != 2 {
+	if n, err := importPrizes("5元额度", "CDK-A\nCDK-B\nCDK-A\n", 0); err != nil || n != 2 {
 		t.Fatalf("import %d %v", n, err)
 	}
 	oldSend := communitySend
@@ -146,7 +146,7 @@ func TestLotterySkipsSmallPool(t *testing.T) {
 	if err := saveCommunityConfig(conf); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := importPrizes("1元", "CDK-ONE"); err != nil {
+	if _, err := importPrizes("1元", "CDK-ONE", 0); err != nil {
 		t.Fatal(err)
 	}
 	oldSend := communitySend
@@ -189,6 +189,90 @@ func TestLotterySkipsSmallPool(t *testing.T) {
 	}
 }
 
+func TestLotteryFallbackTiers(t *testing.T) {
+	openCommunityDB(t)
+	conf := defaultCommunityConfig()
+	conf.MinChars, conf.Cooldown = 1, 0
+	conf.Enabled = true
+	conf.ChatID = "-1001"
+	conf.SpeechNeed = 1
+	conf.Winners = 2
+	conf.MinPool = 5
+	if err := saveCommunityConfig(conf); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := importPrizes("1元", "LOW-A\nLOW-B\nLOW-C", 2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := importPrizes("10元", "MID-A\nMID-B", 3); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := importPrizes("30额度", "BIG-A", 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := importPrizes("x", "BAD-1", -1); err == nil {
+		t.Fatal("negative threshold should fail")
+	}
+	oldSend := communitySend
+	var sent []string
+	communitySend = func(token, chatID, text string, markup json.RawMessage) error {
+		sent = append(sent, chatID+" "+text)
+		return nil
+	}
+	t.Cleanup(func() { communitySend = oldSend })
+	oldCfg := cfg
+	cfg.Telegram.BotToken = "token"
+	t.Cleanup(func() { cfg = oldCfg })
+	used := func(code string) bool {
+		var s string
+		_ = db.QueryRow(`SELECT status FROM lottery_prizes WHERE code = ?`, code).Scan(&s)
+		return s == "used"
+	}
+	speak := func(day time.Time, ids ...int64) {
+		for _, uid := range ids {
+			m := communityMessage{ChatID: -1001, UserID: uid, UserName: fmt.Sprintf("u%d", uid), Text: "/join"}
+			applyCommunity(m, day)
+			m.Text = "hello"
+			recordSpeech(m, day)
+		}
+	}
+
+	// One person: below the lowest tier (2), no draw.
+	day1 := time.Date(2026, 10, 17, 12, 0, 0, 0, shanghai)
+	speak(day1, 1)
+	ada := communityMessage{ChatID: -1001, UserID: 1, UserName: "u1", Text: "/pool"}
+	if reply, _ := applyCommunity(ada, day1); !strings.Contains(reply, "还差 1 人") || !strings.Contains(reply, "满 5 人抽 2 人") || !strings.Contains(reply, "满 2 人抽 2 人（兜底）") {
+		t.Fatalf("pool %q", reply)
+	}
+	settleDue(time.Date(2026, 10, 18, 0, 10, 0, 0, shanghai))
+	if prizeCount() != 6 || !strings.Contains(sent[len(sent)-1], "未满 2 人") {
+		t.Fatalf("left %d sent %#v", prizeCount(), sent)
+	}
+
+	// Three people: the 3-person tier unlocks, so 10元 goes before 1元 and 30额度 stays.
+	day2 := day1.Add(24 * time.Hour)
+	speak(day2, 1, 2, 3)
+	settleDue(time.Date(2026, 10, 19, 0, 10, 0, 0, shanghai))
+	if !used("MID-A") || !used("MID-B") || used("BIG-A") || used("LOW-A") {
+		t.Fatalf("tier 3 handed out wrong prizes, sent %#v", sent)
+	}
+	if !strings.Contains(sent[len(sent)-1], "按 3 人档兜底开奖") {
+		t.Fatalf("notice %q", sent[len(sent)-1])
+	}
+
+	// Five people reach the default tier: 30额度 first, then a 1元.
+	day3 := day2.Add(24 * time.Hour)
+	speak(day3, 1, 2, 3, 4, 5)
+	settleDue(time.Date(2026, 10, 20, 0, 10, 0, 0, shanghai))
+	if !used("BIG-A") || !used("LOW-A") || used("LOW-B") {
+		t.Fatalf("top tier handed out wrong prizes, sent %#v", sent)
+	}
+
+	if n, err := setPrizeNeed([]int64{1, 2, 3}, 9); err != nil || n != 2 {
+		t.Fatalf("set need %d %v", n, err)
+	}
+}
+
 func TestLotteryDailyPlan(t *testing.T) {
 	openCommunityDB(t)
 	conf := defaultCommunityConfig()
@@ -201,10 +285,10 @@ func TestLotteryDailyPlan(t *testing.T) {
 	if err := saveCommunityConfig(conf); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := importPrizes("10元额度", "TEN-A\nTEN-B"); err != nil {
+	if _, err := importPrizes("10元额度", "TEN-A\nTEN-B", 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := importPrizes("30额度", "BIG-C"); err != nil {
+	if _, err := importPrizes("30额度", "BIG-C", 0); err != nil {
 		t.Fatal(err)
 	}
 	id := func(code string) int64 {
@@ -287,7 +371,7 @@ func TestLotteryWaitsForStock(t *testing.T) {
 	if settled != 0 {
 		t.Fatal("should wait for prizes before settling")
 	}
-	if _, err := importPrizes("1元", "CDK-LATE"); err != nil {
+	if _, err := importPrizes("1元", "CDK-LATE", 0); err != nil {
 		t.Fatal(err)
 	}
 	settleDue(time.Date(2026, 10, 18, 0, 20, 0, 0, shanghai))

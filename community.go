@@ -110,6 +110,7 @@ func ensureCommunityTables() error {
 	_, _ = db.Exec(`ALTER TABLE reward_codes ADD COLUMN amount_cents INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE daily_speech_lines ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE lottery_prizes ADD COLUMN plan_day TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE lottery_prizes ADD COLUMN need_pool INTEGER NOT NULL DEFAULT 0`)
 	// Unsent codes from the retired points and fixed-reward flows join the lottery prizes.
 	_, _ = db.Exec(`INSERT OR IGNORE INTO lottery_prizes (name, code) SELECT tier, code FROM reward_codes WHERE status = 'available'`)
 	_, _ = db.Exec(`DELETE FROM reward_codes WHERE status = 'available' AND code IN (SELECT code FROM lottery_prizes)`)
@@ -255,7 +256,7 @@ func communityHelp() string {
 	conf := loadCommunityConfig()
 	return strings.Join([]string{
 		"每日抽奖要先 /join，没报名的发言不计数。报名一次长期有效。",
-		fmt.Sprintf("每天发言满 %d 句进入当天抽奖池，次日随机抽 %d 人，私信发奖。", conf.SpeechNeed, conf.Winners) + minPoolText(conf),
+		fmt.Sprintf("每天发言满 %d 句进入当天抽奖池，次日 0 点随机开奖，私信发奖。", conf.SpeechNeed) + tierText(speechDay(time.Now()), conf),
 		"请先私聊机器人 /start，否则兑换码发不出去。",
 		"/join   报名参加",
 		"/leave   退出，之后不再计数",
@@ -529,7 +530,7 @@ func speechDashboard(now time.Time) speechDash {
 	today := speechToday(now)
 	out := speechDash{
 		Members: today.Members, Speakers: today.Speakers, Qualified: today.Qualified,
-		Need: conf.SpeechNeed, Winners: dayWinners(speechDay(now), conf), MinPool: conf.MinPool,
+		Need: conf.SpeechNeed, Winners: drawNow(speechDay(now), today.Qualified, conf), MinPool: conf.MinPool,
 		Days: []dashDay{},
 	}
 	day := speechDay(now)
