@@ -292,6 +292,7 @@ table.grid-table tbody tr.active{background:var(--panel-2)}
           <label>最少奖池人数<input name="minPool" type="number" min="1" max="100000" value="100" title="奖池不满这个人数，当天不开奖。填 1 表示有人就开奖"></label>
           <label>每句最少字数<input name="minChars" type="number" min="1" max="50" value="3" title="只算文字和数字，标点表情不算。纯数字、同一个字重复（如 哈哈哈）不计"></label>
           <label>两句最短间隔（秒）<input name="cooldown" type="number" min="0" max="3600" value="10" title="距上一句计数不到这么多秒的发言不计，填 0 不限制"></label>
+          <label>群内指令自动删除（秒）<input name="autoDelete" type="number" min="0" max="600" value="3" title="用户在活动群发的 /join 等指令和机器人的回复，过这么多秒自动删除。开奖公告保留。填 0 不删除。删用户消息需要机器人是群管理员并有删除消息权限"></label>
           <label class="check"><input name="cleanLines" type="checkbox" checked>自动清理 48 小时前的聊天和发言次数</label>
         </div>
         <div class="row-actions"><button type="submit">保存活动设置</button></div>
@@ -1148,6 +1149,7 @@ async function loadCommunity(){
     f.cleanLines.checked = cfg.cleanLines !== false;
     f.minChars.value = cfg.minChars || 3;
     f.cooldown.value = cfg.cooldown == null ? 10 : cfg.cooldown;
+    f.autoDelete.value = cfg.autoDelete == null ? 3 : cfg.autoDelete;
     $('lineCount').textContent = '聊天内容和每人发言次数只在后台记录，不在这里展示。当前保存 ' + (data.lineCount || 0) + ' 条。';
     renderPrizes(data.prizes || [], data.prizeLeft || 0);
     renderSpeechDash(data.dashboard);
@@ -1169,7 +1171,8 @@ $('communityForm').addEventListener('submit', async (e) => {
       minPool: Number(f.minPool.value || 100),
       cleanLines: f.cleanLines.checked,
       minChars: Number(f.minChars.value || 3),
-      cooldown: f.cooldown.value === '' ? 10 : Number(f.cooldown.value)
+      cooldown: f.cooldown.value === '' ? 10 : Number(f.cooldown.value),
+      autoDelete: f.autoDelete.value === '' ? 3 : Number(f.autoDelete.value)
     }});
     showMsg('活动设置已保存。', false);
     loadCommunity();

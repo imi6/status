@@ -2763,11 +2763,17 @@ func sendTelegramAll(token string, chats []string, texts []string, markup json.R
 }
 
 func sendTelegram(token, chatID, text string, markup json.RawMessage) error {
+	_, err := sendTelegramMessage(token, chatID, text, markup)
+	return err
+}
+
+// sendTelegramMessage sends a text message and returns its message_id.
+func sendTelegramMessage(token, chatID, text string, markup json.RawMessage) (int, error) {
 	token = strings.TrimSpace(token)
 	chatID = strings.TrimSpace(chatID)
 	text = strings.TrimSpace(text)
 	if token == "" || chatID == "" || text == "" {
-		return nil
+		return 0, nil
 	}
 	payloadMap := map[string]any{
 		"chat_id":                  chatID,
@@ -2779,9 +2785,32 @@ func sendTelegram(token, chatID, text string, markup json.RawMessage) error {
 	}
 	payload, err := json.Marshal(payloadMap)
 	if err != nil {
+		return 0, errors.New("无法编码 Telegram 消息")
+	}
+	var parsed struct {
+		Result struct {
+			MessageID int `json:"message_id"`
+		} `json:"result"`
+	}
+	if err := telegramCall(token, "sendMessage", payload, &parsed); err != nil {
+		return 0, err
+	}
+	return parsed.Result.MessageID, nil
+}
+
+// deleteTelegramMessage removes one chat message. Deleting other people's
+// messages in a group needs the bot to be an admin with "delete messages".
+func deleteTelegramMessage(token, chatID string, messageID int) error {
+	payload, err := json.Marshal(map[string]any{"chat_id": strings.TrimSpace(chatID), "message_id": messageID})
+	if err != nil {
 		return errors.New("无法编码 Telegram 消息")
 	}
-	req, err := http.NewRequest(http.MethodPost, telegramAPI+"/bot"+token+"/sendMessage", bytes.NewReader(payload))
+	return telegramCall(strings.TrimSpace(token), "deleteMessage", payload, nil)
+}
+
+// telegramCall posts a JSON payload to a Bot API method and decodes the reply into out.
+func telegramCall(token, method string, payload []byte, out any) error {
+	req, err := http.NewRequest(http.MethodPost, telegramAPI+"/bot"+token+"/"+method, bytes.NewReader(payload))
 	if err != nil {
 		return errors.New("无法创建 Telegram 请求")
 	}
@@ -2798,6 +2827,9 @@ func sendTelegram(token, chatID, text string, markup json.RawMessage) error {
 	}
 	_ = json.Unmarshal(body, &parsed)
 	if resp.StatusCode == http.StatusOK && parsed.OK {
+		if out != nil {
+			_ = json.Unmarshal(body, out)
+		}
 		return nil
 	}
 	msg := strings.TrimSpace(parsed.Description)

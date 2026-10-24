@@ -26,12 +26,13 @@ type CommunityConfig struct {
 	CleanLines bool   `json:"cleanLines"`
 	MinChars   int    `json:"minChars"`
 	Cooldown   int    `json:"cooldown"`
+	AutoDelete int    `json:"autoDelete"`
 }
 
 func defaultCommunityConfig() CommunityConfig {
 	return CommunityConfig{
 		SpeechNeed: 5, Winners: 1, MinPool: 100, CleanLines: true,
-		MinChars: 3, Cooldown: 10,
+		MinChars: 3, Cooldown: 10, AutoDelete: 3,
 	}
 }
 
@@ -153,6 +154,9 @@ func saveCommunityConfig(c CommunityConfig) error {
 	}
 	if c.Cooldown < 0 || c.Cooldown > 3600 {
 		return errors.New("两句最短间隔需在 0 到 3600 秒")
+	}
+	if c.AutoDelete < 0 || c.AutoDelete > 600 {
+		return errors.New("自动删除需在 0 到 600 秒，0 表示不删除")
 	}
 	if c.MinPool < 1 || c.MinPool > 100000 {
 		return errors.New("最少奖池人数需在 1 到 100000")
@@ -319,12 +323,23 @@ func botToken() string {
 	return strings.TrimSpace(cfg.Telegram.BotToken)
 }
 
-var communitySend = sendTelegram
+// These are swapped in tests.
+var (
+	communitySend   = sendTelegram
+	communitySendID = sendTelegramMessage
+	communityDelete = deleteTelegramMessage
+	communityAfter  = func(d time.Duration, f func()) { time.AfterFunc(d, f) }
+)
 
 func deliverCommunity(msg communityMessage, groupReply, code string) {
 	token := botToken()
 	if token == "" {
 		return
+	}
+	chat := strconv.FormatInt(msg.ChatID, 10)
+	wait := tidyDelay(msg)
+	if wait > 0 && strings.HasPrefix(strings.TrimSpace(msg.Text), "/") {
+		deleteLater(token, chat, msg.MessageID, wait)
 	}
 	if code != "" {
 		dm := "你的兑换码：\n" + code + "\n请妥善保存，群里不会再公布。"
@@ -333,8 +348,35 @@ func deliverCommunity(msg communityMessage, groupReply, code string) {
 		}
 	}
 	if strings.TrimSpace(groupReply) != "" {
-		_ = communitySend(token, strconv.FormatInt(msg.ChatID, 10), groupReply, nil)
+		id, err := communitySendID(token, chat, groupReply, nil)
+		if err == nil && wait > 0 {
+			deleteLater(token, chat, id, wait)
+		}
 	}
+}
+
+// tidyDelay is how long command messages and the bot's replies stay in the
+// activity group; 0 keeps them. Private chats are never tidied.
+func tidyDelay(msg communityMessage) time.Duration {
+	if msg.ChatID == msg.UserID {
+		return 0
+	}
+	conf := loadCommunityConfig()
+	if !conf.Enabled || conf.AutoDelete <= 0 || strconv.FormatInt(msg.ChatID, 10) != communityChatID(conf) {
+		return 0
+	}
+	return time.Duration(conf.AutoDelete) * time.Second
+}
+
+func deleteLater(token, chat string, messageID int, wait time.Duration) {
+	if messageID <= 0 {
+		return
+	}
+	communityAfter(wait, func() {
+		if err := communityDelete(token, chat, messageID); err != nil {
+			log.Printf("community: delete message %d: %v", messageID, err)
+		}
+	})
 }
 
 func notifyGroup(text string) {

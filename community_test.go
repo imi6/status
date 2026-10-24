@@ -540,3 +540,64 @@ func TestSpeechSpamFilters(t *testing.T) {
 		t.Fatal("negative cooldown should fail")
 	}
 }
+
+func TestGroupCommandsAutoDelete(t *testing.T) {
+	openCommunityDB(t)
+	conf := defaultCommunityConfig()
+	conf.Enabled = true
+	conf.ChatID = "-1001"
+	if err := saveCommunityConfig(conf); err != nil {
+		t.Fatal(err)
+	}
+	oldCfg := cfg
+	cfg.Telegram.BotToken = "token"
+	t.Cleanup(func() { cfg = oldCfg })
+	oldSendID, oldDelete, oldAfter := communitySendID, communityDelete, communityAfter
+	t.Cleanup(func() { communitySendID, communityDelete, communityAfter = oldSendID, oldDelete, oldAfter })
+	var replies []string
+	communitySendID = func(token, chatID, text string, markup json.RawMessage) (int, error) {
+		replies = append(replies, chatID)
+		return 900 + len(replies), nil
+	}
+	var deleted []string
+	var waits []time.Duration
+	communityDelete = func(token, chatID string, messageID int) error {
+		deleted = append(deleted, fmt.Sprintf("%s/%d", chatID, messageID))
+		return nil
+	}
+	communityAfter = func(d time.Duration, f func()) { waits = append(waits, d); f() }
+
+	run := func(msg communityMessage) {
+		reply, code := applyCommunity(msg, time.Now())
+		deliverCommunity(msg, reply, code)
+	}
+	run(communityMessage{ChatID: -1001, UserID: 7, UserName: "ada", Text: "/join@zhizhishuai_bot", MessageID: 50})
+	if strings.Join(deleted, ",") != "-1001/50,-1001/901" {
+		t.Fatalf("deleted %v", deleted)
+	}
+	if len(waits) != 2 || waits[0] != 3*time.Second {
+		t.Fatalf("waits %v", waits)
+	}
+
+	// Plain chat, private chats and other groups are left alone.
+	deleted = nil
+	run(communityMessage{ChatID: -1001, UserID: 7, UserName: "ada", Text: "大家好呀", MessageID: 51})
+	run(communityMessage{ChatID: 7, UserID: 7, UserName: "ada", Text: "/pool", MessageID: 52})
+	run(communityMessage{ChatID: -2002, UserID: 7, UserName: "ada", Text: "/pool", MessageID: 53})
+	if len(deleted) != 0 {
+		t.Fatalf("deleted %v", deleted)
+	}
+
+	conf.AutoDelete = 0
+	if err := saveCommunityConfig(conf); err != nil {
+		t.Fatal(err)
+	}
+	run(communityMessage{ChatID: -1001, UserID: 7, UserName: "ada", Text: "/pool", MessageID: 54})
+	if len(deleted) != 0 {
+		t.Fatalf("auto delete off but deleted %v", deleted)
+	}
+	conf.AutoDelete = 601
+	if saveCommunityConfig(conf) == nil {
+		t.Fatal("601 seconds should be rejected")
+	}
+}
